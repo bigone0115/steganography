@@ -1,0 +1,23 @@
+# 태그(v*) push 시: 테스트 → Windows exe 빌드 → GitHub Release에 zip 첨부
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt pytest pyinstaller
+      - run: pytest -q
+      - run: pyinstaller run.py --name StegStudio --windowed --noconfirm --icon steganography_icon.png --collect-data steg_studio
+      - run: Compress-Archive dist/StegStudio StegStudio-${{ github.ref_name }}-win64.zip
+      - run: gh release create ${{ github.ref_name }} StegStudio-${{ github.ref_name }}-win64.zip --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
