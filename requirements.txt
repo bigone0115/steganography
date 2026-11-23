@@ -1,0 +1,12 @@
+# 필수: Python 3.9+
+PySide6>=6.6        # Qt GUI (run.py). 레거시 tkinter 버전(run_tk.py)은 표준 라이브러리만 사용
+
+# 선택 의존성 (없어도 실행되며, 해당 기능만 비활성화됨)
+Pillow>=10.0        # 이미지 LSB 은닉/렌더링, 이미지 미리보기
+yara-python>=4.3    # YARA 룰 기반 악성 패턴 탐지 (없으면 내장 정규식으로 폴백)
+olefile>=0.47       # HWP 5.x / DOC / XLS / PPT (OLE 복합문서) 내부 구조 분석
+oletools>=0.60      # VBA 매크로 추출 및 자동실행/의심 키워드 탐지
+numpy>=2.0          # ML 스테그분석(SPAM 특징) — 없으면 ML 판정만 비활성
+scikit-learn>=1.5   # ML 분류기 (scipy 포함: HILL 시뮬레이션)
+imageio-ffmpeg>=0.5 # 영상 코덱 판별·무손실 키프레임 추출 (ffmpeg 번들)
+pikepdf>=8.0        # PDF 메타 스크럽 시 전체 재작성(압축 XMP·이전 판까지 제거) — 없으면 길이보존 in-place로 폴백

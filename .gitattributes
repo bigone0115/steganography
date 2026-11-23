@@ -1,0 +1,5 @@
+* text=auto
+*.pdf binary
+*.docx binary
+*.hwpx binary
+*.joblib binary

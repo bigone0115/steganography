@@ -1,0 +1,25 @@
+<Configuration>
+  <!--
+    Windows Sandbox 설정 — 확실한 악성 검체를 '일회용 격리 VM'에서 분석할 때 사용.
+    실행: 같은 폴더의 sandbox.cmd 를 더블클릭 (Windows 11 Pro의 "Windows Sandbox" 기능 활성화 필요)
+    창을 닫으면 내부 상태는 통째로 폐기됩니다.
+
+    HostFolder: .wsb는 상대 경로를 지원하지 않으므로 sandbox.cmd가 실행할 때마다
+    아래 HostFolder를 현재 폴더의 절대 경로로 자동 갱신합니다(폴더 이동·다른 PC에서도 동작).
+    네트워크는 차단(Disable)되어 있어 샌드박스 안에 Python/PySide6가 없으면 GUI 실행이 안 됩니다.
+      (A) PyInstaller 단일 exe를 매핑해 실행 (네트워크 불필요, 권장), 또는
+      (B) <Networking>Default</Networking> 로 잠깐 바꿔 pip 설치 후 다시 Disable.
+  -->
+  <Networking>Disable</Networking>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\path\to\Steganography</HostFolder>
+      <SandboxFolder>C:\Steganography</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>cmd.exe /k echo [격리 분석 환경] C:\Steganography = 프로그램(읽기전용). 검체는 별도 폴더를 추가 매핑하세요. exe가 있으면 실행, 없으면 Networking=Default 로 바꿔 Python+PySide6 설치 후 python C:\Steganography\run.py</Command>
+  </LogonCommand>
+</Configuration>
