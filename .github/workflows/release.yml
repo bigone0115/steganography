@@ -17,6 +17,10 @@ jobs:
       - run: pip install -r requirements.txt pytest pyinstaller
       - run: pytest -q
       - run: pyinstaller run.py --name StegStudio --windowed --noconfirm --icon steganography_icon.png --add-data "steg_studio/models;steg_studio/models" --add-data "steg_studio/steganography_icon.png;steg_studio"
+      # 앱은 QtCore/QtGui/QtWidgets만 사용 → 안 쓰는 Qt 파일 제거 (zip 160→132MB, 로컬 실행 확인함)
+      - run: |
+          cd dist/StegStudio/_internal/PySide6
+          Remove-Item -Recurse -Force opengl32sw.dll, translations, Qt6Quick.dll, Qt6Qml*.dll, Qt6Pdf.dll, Qt6VirtualKeyboard.dll, plugins/platforminputcontexts, plugins/imageformats/qpdf.dll, plugins/tls, plugins/networkinformation
       # 데이터 파일이 빠지면 릴리스 전에 실패시킨다
       - run: if (!(Test-Path dist/StegStudio/_internal/steg_studio/models/spam_clf.joblib)) { exit 1 }
       - run: Compress-Archive dist/StegStudio StegStudio-${{ github.ref_name }}-win64.zip
