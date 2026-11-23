@@ -14,3 +14,6 @@ __pycache__/
 build/
 dist/
 *.spec
+
+# 테스트 샘플 (로컬 전용)
+test_file/
