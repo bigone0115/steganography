@@ -272,11 +272,15 @@ pre,textarea{margin:0;background:var(--CRUST);color:var(--TEXT);border:1px solid
 .col{display:flex;flex-direction:column;gap:6px;min-height:0}
 .col fieldset{display:flex;flex-direction:column;min-height:0}
 .col fieldset pre{min-height:0}
-.subtabs{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
-.subtabs button{background:var(--S0);color:var(--SUB);padding:9px 16px;border:0;border-radius:9px 9px 0 0;font-weight:600;cursor:pointer;white-space:nowrap}
-.subtabs button.on{background:var(--BLUE);color:var(--ON)}
-.pane{display:none;flex:1;min-height:0;border:1px solid var(--S0);border-radius:0 8px 8px 8px;background:var(--CRUST);overflow:auto}
+/* 상세 분석 뷰어 — 헤더 탭과 같은 세그먼트형, 한 줄(좁으면 가로 스크롤) */
+.seg{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px;padding:4px;background:var(--CRUST);border:1px solid var(--S0);border-radius:10px;flex:none}
+.seg button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:0;background:transparent;color:var(--SUB);padding:6px 2px;border:0;border-radius:7px;font-weight:600;font-size:12px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s}
+.seg .ic{font-size:16px;line-height:1}
+.seg button:hover:not(.on){background:var(--S0);color:var(--TEXT)}
+.seg button.on{background:var(--BLUE);color:var(--ON)}
+.pane{display:none;flex:1;min-height:0;margin-top:8px;border:1px solid var(--S0);border-radius:8px;background:var(--CRUST);overflow:auto}
 .pane.on{display:block} .pane pre{border:0;border-radius:0;min-height:100%}
+.pane .row{border-bottom:1px solid var(--S0)}
 .ph{color:var(--S2);padding:30px;text-align:center}
 .imgbox{padding:10px;text-align:center} .imgbox img{width:max(240px,40%);max-width:100%;image-rendering:pixelated;border:1px solid var(--S0)}
 .verdict{display:inline-block;padding:1px 8px;border-radius:6px;font-weight:700;color:var(--ON)}
@@ -328,10 +332,11 @@ dialog{background:var(--MANTLE);color:var(--TEXT);border:1px solid var(--S0);bor
    <fieldset style="flex:1"><legend>통합 포렌식 스캔 리포트</legend><pre id="sLog" style="flex:1"></pre></fieldset>
   </div>
   <div class="col">
-   <div class="subtabs" id="insp">
-    <button data-p="code" class="on">📄 코드 / Hex 뷰어</button><button data-p="img">🖼️ 이미지 뷰어</button>
-    <button data-p="meta">🧩 메타데이터 / 청크</button><button data-p="bit">🔬 비트 평면</button>
-    <button data-p="ent">📈 엔트로피 차트</button><button data-p="str">🔤 문자열(strings)</button><button data-p="rep">📑 리포트</button>
+   <fieldset style="flex:1"><legend>상세 분석 뷰어</legend>
+   <div class="seg" id="insp">
+    <button data-p="code" class="on" title="코드 / Hex 뷰어"><span class="ic">📄</span>코드·Hex</button><button data-p="img" title="이미지 뷰어"><span class="ic">🖼️</span>이미지</button>
+    <button data-p="meta" title="메타데이터 / 청크"><span class="ic">🧩</span>메타·청크</button><button data-p="bit" title="비트 평면"><span class="ic">🔬</span>비트 평면</button>
+    <button data-p="ent" title="엔트로피 차트"><span class="ic">📈</span>엔트로피</button><button data-p="str" title="문자열(strings)"><span class="ic">🔤</span>문자열</button><button data-p="rep" title="분석 리포트"><span class="ic">📑</span>리포트</button>
    </div>
    <div class="pane on" id="p-code"><pre id="vCode"></pre></div>
    <div class="pane" id="p-img"><div class="imgbox" id="vImg"><div class="ph">은닉 이미지가 탐지되면 여기에 표시됩니다.</div></div></div>
@@ -341,6 +346,7 @@ dialog{background:var(--MANTLE);color:var(--TEXT);border:1px solid var(--S0);bor
    <div class="pane" id="p-ent"><canvas id="vEnt" style="width:100%;height:100%;display:block"></canvas></div>
    <div class="pane" id="p-str"><pre id="vStr"></pre></div>
    <div class="pane" id="p-rep"><iframe id="vRep" sandbox title="분석 리포트" style="width:100%;height:100%;border:0;background:#1e1e2e;display:block"></iframe></div>
+   </fieldset>
   </div>
  </div>
  <div class="status" id="sStatus">파일을 선택하고 [정밀 포렌식 스캔]을 누르세요.</div>
@@ -464,7 +470,7 @@ function renderBitplane(){
   const img=new Image(); img.onload=()=>{const c=el('canvas');c.width=img.naturalWidth;c.height=img.naturalHeight;const x=c.getContext('2d');x.drawImage(img,0,0);
     const d=x.getImageData(0,0,c.width,c.height),p=d.data,ch=$('bpCh').selectedIndex,bit=$('bpBit').selectedIndex;
     for(let i=0;i<p.length;i+=4){const v=ch===3?Math.round((p[i]*299+p[i+1]*587+p[i+2]*114)/1000):p[i+ch];const o=((v>>bit)&1)*255;p[i]=p[i+1]=p[i+2]=o;p[i+3]=255}
-    x.putImageData(d,0,0);c.style.cssText='max-width:100%;image-rendering:pixelated;border:1px solid var(--S0)';box.replaceChildren(c);URL.revokeObjectURL(img.src)};
+    x.putImageData(d,0,0);c.style.cssText='width:max(240px,40%);max-width:100%;image-rendering:pixelated;border:1px solid var(--S0)';box.replaceChildren(c);URL.revokeObjectURL(img.src)};
   img.onerror=()=>box.replaceChildren(el('div','브라우저에서 이 이미지를 디코딩할 수 없습니다.','ph'));
   img.src=URL.createObjectURL(S.file);
 }
