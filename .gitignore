@@ -20,3 +20,7 @@ test_file/
 
 # AI 협업 대화 기록 (내부용, 공개 금지)
 AI/
+
+# 발표 자료 (로컬 전용)
+ppt.md
+ppt_claude.md
