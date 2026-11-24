@@ -22,6 +22,23 @@ python -m steg_studio batch 폴더 -r --csv out.csv --html out.html
 python -m steg_studio diff 원본.png 의심.png
 ```
 
+### Docker (웹 UI / CLI)
+
+설치 없이 이미지를 받아 실행합니다. 이미지는 GitHub Actions(`.github/workflows/docker.yml`)가
+테스트 통과 후 GHCR에 자동 배포합니다 — `main` 푸시 시 `:main`, `v*` 태그 시 `:<버전>`·`:latest`.
+
+```bash
+docker pull ghcr.io/bigone0115/steganography:main
+
+# 웹 UI → 브라우저에서 http://localhost:47821
+docker run --rm -p 127.0.0.1:47821:47821 ghcr.io/bigone0115/steganography:main web --host 0.0.0.0
+
+# CLI (현재 폴더를 /data로 연결)
+docker run --rm -v "$PWD:/data" ghcr.io/bigone0115/steganography:main scan /data/의심.png
+```
+
+직접 빌드: `docker build -t steg-studio .` · 컨테이너에는 데스크톱 GUI(PySide6)가 없고, 웹 UI에는 은닉 탭을 두지 않습니다.
+
 ### 플랫폼
 
 Windows·Linux·macOS 공통으로 동작합니다(코드는 하나로 유지). 프로세스 격리는

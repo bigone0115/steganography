@@ -1,0 +1,97 @@
+# 도커 이미지 CI/CD → GitHub Container Registry(GHCR)
+#  - PR        : 테스트 + 이미지 빌드·스모크 테스트만 (푸시 안 함)
+#  - main push : 테스트 통과 시 ghcr.io/<owner>/steganography:main, :sha-<커밋> 푸시
+#  - v* 태그   : 테스트 통과 시 :<버전>(예 5.0.0), :latest 푸시  (Windows exe 릴리스는 release.yml이 별도 수행)
+# 인증은 내장 GITHUB_TOKEN만 사용 — 별도 시크릿 불필요.
+name: Docker
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR 이미지 이름은 소문자만 허용 (저장소명 Steganography → steganography)
+      - name: 이미지 이름
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # 1) 로컬로 빌드해서 실제로 띄워 본다 — 깨진 이미지는 레지스트리에 올리지 않음
+      - name: 빌드 (스모크 테스트용)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: steg-studio:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 스모크 테스트 (CLI + 웹 UI 응답)
+        run: |
+          docker run --rm steg-studio:ci --version
+          docker run -d --name web -p 127.0.0.1:47821:47821 steg-studio:ci web --host 0.0.0.0
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:47821/ -o /dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:47821/ | grep -q "포렌식 보안 스튜디오"
+          printf 'hello' > /tmp/t.txt
+          curl -fsS -X POST --data-binary @/tmp/t.txt -H "X-Filename: t.txt" http://127.0.0.1:47821/api/scan | grep -q '"verdict"'
+          docker rm -f web
+
+      # 2) PR이 아니면 GHCR에 푸시 (캐시 재사용이라 재빌드는 빠름)
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+      - if: github.event_name != 'pull_request'
+        name: 요약
+        run: |
+          echo "### 푸시된 이미지" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "실행: \`docker run --rm -p 127.0.0.1:47821:47821 ${IMAGE}:main web --host 0.0.0.0\`" >> "$GITHUB_STEP_SUMMARY"
