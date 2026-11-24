@@ -1,0 +1,15 @@
+# 비밀키·개인 파일은 이미지에 절대 포함 금지
+api_list.txt
+.env
+개발자를위한메모.txt
+run_error.log
+backup/
+test_file/
+AI/
+meta/
+.git/
+.github/
+__pycache__/
+.pytest_cache/
+build/
+dist/
