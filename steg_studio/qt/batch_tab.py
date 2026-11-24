@@ -167,8 +167,9 @@ class BatchTab(QWidget):
             "summary": summary, "path": path, "crit": bool(crit),
         })
         self._refresh_table()
-        self.pbar.setValue(idx)
-        self.status.setText(f"스캔 중… {idx}/{total} (격리 실행)")
+        # 병렬 실행이라 idx(원래 번호)는 완료 순서가 아님 → 진행률은 완료 개수로
+        self.pbar.setValue(len(self._results))
+        self.status.setText(f"스캔 중… {len(self._results)}/{total} (격리 실행, 동시 {engine.default_workers()}개)")
 
     # ---------------- 정렬·필터 ----------------
     def _on_header(self, col):
@@ -218,6 +219,8 @@ class BatchTab(QWidget):
             rows.sort(key=lambda r: r["filename"].lower(), reverse=self._sort_desc)
         elif self._sort_col == _COL_SIZE:
             rows.sort(key=lambda r: r["size"], reverse=self._sort_desc)
+        else:
+            rows.sort(key=lambda r: r["idx"])      # 병렬 완료 순서와 무관하게 원래 파일 순서
         return rows
 
     def _refresh_table(self):
@@ -273,7 +276,9 @@ class BatchTab(QWidget):
             "CSV (*.csv)" if fmt == "csv" else "HTML (*.html)")
         if not path:
             return
-        content = engine.build_batch_csv(self._results) if fmt == "csv" else engine.build_batch_html(self._results)
+        order = {p: i for i, p in enumerate(self._files)}
+        results = sorted(self._results, key=lambda r: order.get(r.filepath, len(order)))   # 리포트는 원래 파일 순서
+        content = engine.build_batch_csv(results) if fmt == "csv" else engine.build_batch_html(results)
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(content)
         self.status.setText(f"리포트 저장 완료: {path}")

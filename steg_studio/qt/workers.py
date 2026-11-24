@@ -2,8 +2,6 @@
 백그라운드 작업 스레드 (QThread) — UI 프리징 방지.
 """
 
-import os
-
 from PySide6.QtCore import QThread, Signal
 
 from .. import engine, sandbox
@@ -63,21 +61,17 @@ class BatchWorker(QThread):
         self._cancel = True
 
     def run(self):
+        # 단일 스캔과 동일하게 파일마다 '격리' 자식 프로세스 — 실제 멀웨어를 본체와 분리.
+        # 격리 프로세스 여러 개를 동시에 돌리고, 끝나는 순서대로 (원래 번호, 결과)를 보낸다.
         total = len(self.files)
         done = 0
-        for i, fp in enumerate(self.files, 1):
-            if self._cancel:
-                break
-            # 단일 스캔과 동일하게 자식 프로세스에서 '격리' 실행 — 실제 멀웨어를 본체와 분리.
-            try:
-                result = sandbox.run_scan_isolated(fp, self.password)
-            except Exception as e:
-                result = engine.ScanResult(filename=os.path.basename(fp), findings=[f"[격리 스캔 실패] {e}"])
-                result.filepath = fp
-                try:
-                    result.filesize = os.path.getsize(fp)
-                except OSError:
-                    pass
-            done = i
-            self.progress.emit(i, total, result)
+        gen = engine.scan_many(self.files, self.password, isolated=True)
+        try:
+            for i, result in gen:
+                done += 1
+                self.progress.emit(i + 1, total, result)
+                if self._cancel:
+                    break                      # 남은(미시작) 작업은 scan_many가 취소
+        finally:
+            gen.close()
         self.finished_all.emit(done)

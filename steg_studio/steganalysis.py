@@ -12,6 +12,11 @@ import math
 import re
 import struct
 
+try:
+    import numpy as _np        # 선택 의존성: 있으면 픽셀 루프를 벡터화(없으면 아래 순수 Python 경로)
+except ImportError:
+    _np = None
+
 
 # ---- 불완전 감마함수 (카이제곱 p-value 계산용, Numerical Recipes 방식) ----
 def _gammln(xx):
@@ -745,6 +750,22 @@ def ws_analysis(pixels, width, height, channels=3, max_rows=400):
     band_h = max(2, (height - 2) // bands)
     num_b = [0.0] * bands
     den_b = [0.0] * bands
+    if _np is not None:
+        # 아래 순수 Python 루프와 같은 식을 행렬 연산으로 (600x450 기준 ~1s → ~20ms)
+        band_of_row = _np.minimum(bands - 1, _np.arange(height - 2) // band_h)
+        flat = _np.frombuffer(bytes(pixels), dtype=_np.uint8)
+        for c in range(channels):
+            ch = flat[c::channels][:width * height].reshape(height, width).astype(_np.int32)
+            n1, n2, n3, n4 = ch[:-2, 1:-1], ch[2:, 1:-1], ch[1:-1, :-2], ch[1:-1, 2:]
+            pred = (n1 + n2 + n3 + n4) / 4.0
+            var = ((n1 - pred) ** 2 + (n2 - pred) ** 2 + (n3 - pred) ** 2 + (n4 - pred) ** 2) / 4.0
+            w = 1.0 / (5.0 + var)
+            s = ch[1:-1, 1:-1]
+            num_row = (w * (s - (s ^ 1)) * (s - pred)).sum(axis=1)
+            den_row = w.sum(axis=1)
+            num_b = [a + b for a, b in zip(num_b, _np.bincount(band_of_row, num_row, bands).tolist())]
+            den_b = [a + b for a, b in zip(den_b, _np.bincount(band_of_row, den_row, bands).tolist())]
+        channels = 0                                   # 아래 순수 Python 루프 건너뜀
     for c in range(channels):
         ch = pixels[c::channels][:width * height]
         for y in range(1, height - 1):

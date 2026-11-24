@@ -8,14 +8,22 @@
 
 import math
 
+try:
+    import numpy as _np        # 선택 의존성: 있으면 바이트 빈도를 C 속도로(10MB 0.6s → 수 ms)
+except ImportError:
+    _np = None
+
 
 def calc_entropy(data: bytes) -> float:
     """바이트 데이터의 섀넌 엔트로피(0.0 ~ 8.0 bits)를 계산합니다. 값이 높을수록 암호화/압축 가능성이 큽니다."""
     if not data:
         return 0.0
-    freq = [0] * 256
-    for b in data:
-        freq[b] += 1
+    if _np is not None:
+        freq = _np.bincount(_np.frombuffer(bytes(data), dtype=_np.uint8), minlength=256).tolist()
+    else:
+        freq = [0] * 256
+        for b in data:
+            freq[b] += 1
     entropy = 0.0
     length = len(data)
     for count in freq:

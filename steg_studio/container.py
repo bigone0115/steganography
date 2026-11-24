@@ -89,7 +89,11 @@ def inspect_png(data):
 
     # 표준 zlib 레벨로 재현되는지(참고) — 최적화 도구(zopfli 등)는 불일치가 정상이라 위협으로 보지 않음
     comp = raw[:expected]
-    if any(zlib.compress(comp, lv) == bytes(idat[:len(idat) - len(d.unused_data)]) for lv in range(10)):
+    # 해제 데이터를 레벨별로 최대 10번 재압축하는 검사라 큰 이미지에선 수 초가 걸린다(6MP PNG 3.4s).
+    # 위협 판정에 쓰지 않는 참고 정보이므로 4MB 초과는 생략.
+    if len(comp) > 4 * 1024 * 1024:
+        lines.append("   - 압축: 대용량이라 표준 zlib 재현 검사 생략(참고 항목)")
+    elif any(zlib.compress(comp, lv) == bytes(idat[:len(idat) - len(d.unused_data)]) for lv in (6, 9, 1, 0, 2, 3, 4, 5, 7, 8)):
         lines.append("   - 압축: 표준 zlib 레벨로 정확히 재현됨")
     else:
         lines.append("   - 압축: 표준 zlib 레벨과 불일치(최적화 도구/타 인코더면 정상, 참고용)")

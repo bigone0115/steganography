@@ -20,13 +20,15 @@ import time
 import base64
 import tempfile
 import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from . import engine, analysis, __version__
 
 DEFAULT_PORT = 47821
 MAX_UPLOAD = 100 * 1024 * 1024    # 업로드 상한 100MB (엔진 상한 256MB보다 작게: 시연·메모리 여유)
 MAX_ITEM_B64 = 20 * 1024 * 1024   # 탐지 항목 다운로드용 원본 동봉 상한(항목당)
+SCAN_TIMEOUT = 600                 # 파일 1개 분석 최대 대기(초)
+_POOL = None                       # serve()가 만드는 스캔 프로세스 풀 (없으면 요청 스레드에서 직접 분석)
 _ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steganography_icon.png")   # 앱 아이콘(GUI와 동일)
 
 _IMG_SIGS = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
@@ -166,7 +168,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ---- 라우트 (모두 업로드 파일을 읽기만 하고, 결과 파일은 응답으로 돌려준다) ----
     def _scan(self, path, name, data):
-        return _scan_payload(path, self._hdr("X-Password"))
+        # 무거운 스캔은 프로세스 풀로 — 요청 스레드는 기다리기만 하므로 여러 요청이 동시에 분석된다
+        if _POOL is None:
+            return _scan_payload(path, self._hdr("X-Password"))
+        return _POOL.submit(_scan_payload, path, self._hdr("X-Password")).result(timeout=SCAN_TIMEOUT)
 
     def _cdr(self, path, name, data):
         _, natural_eof = engine.identify_carrier_and_eof(data)
@@ -193,9 +198,17 @@ class _Handler(BaseHTTPRequestHandler):
         print(f"[web] {self.address_string()} {fmt % args}", flush=True)
 
 
-def serve(host="127.0.0.1", port=DEFAULT_PORT):
-    # ponytail: 단일 스레드 서버(한 번에 한 건 분석). 동시 사용자가 생기면 ThreadingHTTPServer + 엔진 스레드 안전성 점검
-    httpd = HTTPServer((host, port), _Handler)
+def serve(host="127.0.0.1", port=DEFAULT_PORT, workers=None):
+    """요청마다 스레드(ThreadingHTTPServer) + 스캔은 프로세스 풀(동시 workers개). 엔진을 스레드로 공유하지 않아 스레드 안전성 문제 없음."""
+    global _POOL
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    engine.limit_blas_threads()                       # 풀 작업자가 상속하도록 생성 전에
+    workers = workers or engine.default_workers()
+    _POOL = ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"),
+                                initializer=engine.exit_with_parent)    # 서버가 강제 종료돼도 작업자 정리
+    httpd = ThreadingHTTPServer((host, port), _Handler)
+    httpd.daemon_threads = True
     import signal
 
     def _stop(*_):
@@ -203,13 +216,14 @@ def serve(host="127.0.0.1", port=DEFAULT_PORT):
 
     signal.signal(signal.SIGTERM, _stop)
     shown = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
-    print(f"[+] 웹 UI 실행: http://{shown}:{port}  (종료: Ctrl+C)", flush=True)
+    print(f"[+] 웹 UI 실행: http://{shown}:{port}  (동시 분석 {workers}개, 종료: Ctrl+C)", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         httpd.server_close()
+        _POOL.shutdown(wait=False, cancel_futures=True)
 
 
 # =========================================================================
@@ -501,17 +515,23 @@ $('bRun').onclick=async()=>{
   if(bBusy){bCancel=true;$('bStatus').textContent='취소 중… (진행 중인 파일 끝나면 중단)';return}
   bBusy=true;bCancel=false;bResults=[];$('bRows').replaceChildren();$('bRun').textContent='취소';$('bCsv').disabled=$('bHtml').disabled=true;
   const pg=$('bProg');pg.hidden=false;pg.max=bList.length;pg.value=0; let sus=0;
-  for(const [i,f] of bList.entries()){ if(bCancel)break;
-    $('bStatus').textContent=`[${i+1}/${bList.length}] ${f.webkitRelativePath||f.name} 스캔 중…`;
+  // 파일 순서대로 행을 먼저 만들고, 동시에 BATCH_PAR개씩 업로드·분석(서버는 프로세스 풀로 병렬 처리)
+  const BATCH_PAR=3, rowsEl=bList.map((f,i)=>{const tr=el('tr');tr.append(el('td',String(i+1)),el('td','대기'),el('td',f.webkitRelativePath||f.name),el('td','-'),el('td',fmt(f.size)),el('td',''));$('bRows').append(tr);return tr});
+  let next=0,done=0;
+  async function work(){ while(!bCancel&&next<bList.length){ const i=next++,f=bList[i],tr=rowsEl[i];
+    tr.children[1].textContent='분석 중…';
     let row; try{const d=await post('/api/scan',f);d.file=f;row={n:i+1,verdict:d.verdict,name:f.webkitRelativePath||f.name,fmt:d.carrier,size:d.filesize,summary:d.findings[0]||'특이사항 없음',data:d}}
     catch(e){row={n:i+1,verdict:'오류',name:f.webkitRelativePath||f.name,fmt:'-',size:f.size,summary:e.message,data:null}}
-    if(row.verdict==='의심')sus++; bResults.push(row);
-    const tr=el('tr');const vc=el('td');vc.append(el('span',row.verdict,'verdict v-'+row.verdict));
-    tr.append(el('td',String(row.n)),vc,el('td',row.name),el('td',row.fmt),el('td',fmt(row.size)),el('td',row.summary));
+    if(row.verdict==='의심')sus++; bResults[i]=row;
+    const vc=el('td');vc.append(el('span',row.verdict,'verdict v-'+row.verdict));
+    tr.replaceChildren(el('td',String(row.n)),vc,el('td',row.name),el('td',row.fmt),el('td',fmt(row.size)),el('td',row.summary));
     tr.ondblclick=()=>{if(!row.data)return;S=row.data;$('tabbar').children[0].click();$('sPath').value=row.name+'  ('+fmt(row.size)+' bytes)';sFileObj=row.data.file;$('sScan').disabled=false;renderScan()};
     tr.onclick=()=>[...$('bRows').children].forEach(r=>r.classList.toggle('sel',r===tr));
-    $('bRows').append(tr); pg.value=i+1;
-  }
+    pg.value=++done; $('bStatus').textContent=`[${done}/${bList.length}] 분석 완료 · 동시 ${BATCH_PAR}개 처리 중`;
+  } }
+  await Promise.all(Array.from({length:Math.min(BATCH_PAR,bList.length)},work));
+  rowsEl.forEach((tr,i)=>{if(!bResults[i])tr.remove()});        // 취소로 시작 못 한 행 정리
+  bResults=bResults.filter(Boolean);
   $('bStatus').textContent=`${bCancel?'취소됨':'완료'} — ${bResults.length}개 검사, 의심 ${sus}개`;
   pg.hidden=true;$('bRun').textContent='일괄 스캔 시작';bBusy=false;$('bCsv').disabled=$('bHtml').disabled=!bResults.length;
 };

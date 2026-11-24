@@ -24,7 +24,7 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
 
-from . import crypto, analysis, docscan, steganalysis, ioc, container, ml, video
+from . import crypto, analysis, docscan, steganalysis, ioc, container, ml, video, delivery
 from .constants import LSB_MAGIC, EOF_MAGIC, MAX_SCAN_FILE_BYTES
 
 # 사용자 지정 YARA 룰 폴더(.yar). GUI가 set_user_yara_dir()로 설정. UI 비의존 유지용 모듈 전역.
@@ -394,6 +394,9 @@ def _parse_zip_natural_eof(data):
 def identify_carrier_and_eof(data):
     """파일 선두 매직으로 컨테이너 포맷을 식별하고, 그 포맷의 '정상 종료 지점(natural EOF)' 오프셋을 계산해 (포맷명, EOF) 반환."""
     size = len(data)
+    dv = delivery.identify(data)          # RTF / LNK / ISO·IMG / VHD(X) — 공격 전달 포맷
+    if dv:
+        return dv
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         pos = 8
         while pos + 12 <= size:
@@ -499,6 +502,8 @@ def carve_embedded_media(data, carrier_fmt, natural_eof):
     # (예: word/media/image1.png)의 시그니처가 노출돼 은닉으로 오탐된다. 이를 막기 위해 ZIP 계열은
     # 모든 미디어 카빙을 정상 종료(EOCD) 이후부터만 수행한다(EOCD 뒤에 결합된 진짜 은닉은 여전히 포착).
     zip_self = data.startswith(b"PK\x03\x04")
+    # ISO 디스크 이미지도 같은 이유 — 내부 파일은 delivery가 파일시스템 구조로 정확히 꺼내므로 시그니처 중복 카빙 생략
+    zip_self = zip_self or (len(data) >= 0x8006 and data[0x8001:0x8006] == b"CD001")
     base = natural_eof if zip_self else start_search
 
     pos = base
@@ -776,20 +781,13 @@ def extract_structural_payloads(data, carrier_fmt):
 
 
 def extract_strings(data, min_len=4, max_count=4000):
-    """바이너리에서 출력 가능한 ASCII 문자열 시퀀스를 추출한다 (strings 유틸리티 유사)."""
+    """바이너리에서 출력 가능한 ASCII 문자열 시퀀스를 추출한다 (strings 유틸리티 유사).
+    바이트 단위 파이썬 루프 대신 정규식(C 구현)으로 같은 결과를 낸다 — 10MB 기준 2.0s → 수십 ms."""
     out = []
-    cur = bytearray()
-    for b in data:
-        if 32 <= b <= 126:
-            cur.append(b)
-        else:
-            if len(cur) >= min_len:
-                out.append(cur.decode("ascii"))
-                if len(out) >= max_count:
-                    return out
-            cur = bytearray()
-    if len(cur) >= min_len:
-        out.append(cur.decode("ascii"))
+    for m in re.finditer(rb"[\x20-\x7e]{%d,}" % max(1, min_len), data):
+        out.append(m.group().decode("ascii"))
+        if len(out) >= max_count:
+            break
     return out
 
 
@@ -1923,6 +1921,9 @@ def scan_file(target_path, password="", log=None):
         if not c_threats:
             emit("  [+] 정상: 컨테이너 내부 틈새에서 은닉 흔적이 없습니다.")
 
+    # [4-F] 공격 전달 포맷 (RTF OLE 객체 / LNK 바로가기 / ISO·IMG·VHD 디스크 이미지)
+    _delivery_step(file_bytes, result, findings, emit)
+
     # [5] 코드/YARA 패턴
     yara_mode_str = "정식 yara-python 엔진" if YARA_ENGINE_AVAILABLE else "내장 정규식 시그니처(Regex Heuristic)"
     emit(f"\n[5] 코드/스크립트 패턴 & 난독화 디코딩 & 위협 룰 매칭 ({yara_mode_str})")
@@ -2157,6 +2158,105 @@ th{{background:#313244;color:#89b4fa}} code{{color:#a6e3a1}}
 </body></html>"""
 
 
+def default_workers():
+    """일괄 스캔 동시 작업 수 — 코어 절반, 최대 8. 파일 1개 분석이 수백 MB를 쓸 수 있어 코어 전부는 쓰지 않는다."""
+    return max(1, min(8, (os.cpu_count() or 2) // 2))
+
+
+def limit_blas_threads():
+    """numpy/scipy(OpenBLAS·MKL·OpenMP)가 코어 수만큼 스레드·버퍼를 잡지 않게 1로 고정.
+    병렬 작업자 N개가 각각 코어 수만큼 스레드를 띄우면 과부하·메모리 초과가 난다(격리 스캔 1GB 상한 버그와 같은 원인).
+    자식 프로세스를 띄우기 '전에' 호출해야 자식에 상속된다."""
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+def exit_with_parent():
+    """프로세스 풀 작업자 initializer — 부모(서버/CLI)가 강제 종료돼도 작업자가 고아로 남지 않게 부모를 감시한다."""
+    import threading
+    ppid = os.getppid()
+
+    def watch():
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.WinDLL("kernel32")
+            k32.OpenProcess.restype = ctypes.c_void_p
+            h = k32.OpenProcess(0x00100000, False, ppid)          # SYNCHRONIZE
+            if h:
+                k32.WaitForSingleObject(ctypes.c_void_p(h), 0xFFFFFFFF)   # 부모 종료까지 대기
+        else:
+            import time
+            while os.getppid() == ppid:
+                time.sleep(2)
+        os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
+def _scan_for_batch(path, password=""):
+    """일괄 스캔 작업 단위(프로세스 풀에서 실행). 실패해도 결과 객체로 돌려주고, 원본 바이트는 빼서 전송량을 줄인다."""
+    try:
+        r = scan_file(path, password)
+    except Exception as e:
+        r = ScanResult(filename=os.path.basename(path), filepath=path, findings=[f"[오류] {e}"])
+        try:
+            r.filesize = os.path.getsize(path)
+        except OSError:
+            pass
+    r.file_bytes = b""
+    return r
+
+
+def _scan_isolated_for_batch(path, password, timeout, mem_limit_mb):
+    from . import sandbox                       # sandbox → engine 순환 import 회피
+    try:
+        r = sandbox.run_scan_isolated(path, password, timeout=timeout, mem_limit_mb=mem_limit_mb)
+    except Exception as e:
+        r = ScanResult(filename=os.path.basename(path), filepath=path, findings=[f"[격리 스캔 실패] {e}"])
+        try:
+            r.filesize = os.path.getsize(path)
+        except OSError:
+            pass
+    r.file_bytes = b""
+    return r
+
+
+def scan_many(paths, password="", workers=None, isolated=False, timeout=180, mem_limit_mb=1024):
+    """
+    여러 파일을 병렬 스캔해 '끝나는 순서대로' (원래 인덱스, ScanResult)를 yield.
+    - isolated=True : 파일마다 격리 자식 프로세스(sandbox, 메모리·시간 상한) — 스레드 N개가 자식 N개를 동시에 띄움
+    - isolated=False: 프로세스 풀 — 작업자마다 라이브러리·ML 모델을 한 번만 로드해 재사용
+    소비하는 쪽이 중간에 멈추면(break/close) 아직 시작 안 한 작업은 취소된다.
+    """
+    from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+    import multiprocessing as mp
+    paths = list(paths)
+    workers = max(1, min(workers or default_workers(), len(paths) or 1))
+    limit_blas_threads()
+    if isolated:
+        ex = ThreadPoolExecutor(max_workers=workers)
+        submit = lambda p: ex.submit(_scan_isolated_for_batch, p, password, timeout, mem_limit_mb)
+    elif workers == 1:
+        for i, p in enumerate(paths):
+            yield i, _scan_for_batch(p, password)
+        return
+    else:
+        # spawn: 플랫폼 공통·스레드 있는 부모에서도 안전(fork 교착 회피)
+        ex = ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn"), initializer=exit_with_parent)
+        submit = lambda p: ex.submit(_scan_for_batch, p, password)
+    try:
+        futs = {submit(p): i for i, p in enumerate(paths)}
+        for f in as_completed(futs):
+            i = futs[f]
+            try:
+                r = f.result()
+            except Exception as e:                  # 작업자 프로세스 비정상 종료 등 — 그 파일만 오류로 기록
+                r = ScanResult(filename=os.path.basename(paths[i]), filepath=paths[i], findings=[f"[오류] 작업자 실패: {e}"])
+            yield i, r
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
 def _verdict(result):
     crit = [f for f in result.findings if any(k in f for k in ("CRITICAL", "HIGH", "WARNING", "TAMPERED"))]
     return ("의심" if crit else "참고" if result.findings else "정상"), (crit or result.findings or ["특이사항 없음"])[0]
@@ -2251,6 +2351,25 @@ def diff_files(path_a, path_b, max_ranges=50):
     return "\n".join(out)
 
 
+def _delivery_step(file_bytes, result, findings, emit):
+    """[4-F] 공격 전달 포맷 구조 분석 결과를 경보·뷰어 항목으로 반영."""
+    lines, threats, payloads = delivery.inspect(file_bytes)
+    if not (lines or threats):
+        return
+    emit("\n[4-F] 공격 전달 포맷 분석 (RTF OLE 객체 / LNK 바로가기 / ISO·IMG·VHD 디스크 이미지)")
+    for ln in lines[:80]:
+        emit("  " + ln)
+    result.meta_report += "\n\n" + "\n".join(lines)
+    for grade, msg in threats:
+        findings.append(f"[전달포맷/{grade}] {msg}")
+        emit(f"  [!] {msg}")
+    for sp in payloads:
+        _add(result, sp["category"], sp["fmt"], sp["offset"], sp["data"], sp["detail"], sp["name"], sp.get("decoded"))
+        emit(f"  [+] 내부 객체/파일 추출 → 뷰어 항목 추가: {sp['name']} ({len(sp['data']):,} B)")
+    if not threats:
+        emit("  [+] 정상: 전달 포맷 구조에서 위협 신호가 없습니다.")
+
+
 def _recursive_extract(result, findings, emit, max_depth=2, max_added=50):
     """
     이미 카빙된 항목의 data 안을 다시 스캔해 중첩 은닉(예: PNG 안의 ZIP, ZIP 안의 docx)을
@@ -2306,6 +2425,22 @@ def _recursive_extract(result, findings, emit, max_depth=2, max_added=50):
             added += 1
         for dt in dthreats:
             findings.append(f"[재귀/HIGH] {item.name} 내부 문서 위협: {dt}")
+
+        # (c) 내부가 전달 포맷(예: ISO 안의 LNK, RTF 안의 Package)이면 구조 분석
+        _dl, dvthreats, dvpayloads = delivery.inspect(sub)
+        for grade, msg in dvthreats:
+            findings.append(f"[재귀/{grade}] {item.name} 내부: {msg}")
+            emit(f"  [!] {item.name} 내부: {msg}")
+        for sp in dvpayloads:
+            k = key_of(sp["data"], sp["fmt"])
+            if k in seen or added >= max_added:
+                continue
+            seen.add(k)
+            newit = _add(result, "재귀 " + sp["category"], sp["fmt"], f"{item.offset}:{sp['offset']}",
+                         sp["data"], f"{item.name} 내부: {sp['detail']}", sp["name"], sp.get("decoded"))
+            added += 1
+            if newit.size > 64 and depth < max_depth:
+                worklist.append((newit, depth + 1))
 
     if added == 0:
         emit("  [+] 정상: 카빙 항목 내부에서 추가 중첩 은닉이 발견되지 않았습니다.")

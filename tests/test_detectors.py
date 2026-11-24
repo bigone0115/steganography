@@ -713,3 +713,97 @@ def test_png_private_chunk_and_mp4_gps():
     rows, alerts = engine.extract_file_metadata(mp4)
     assert dict(rows)["촬영 위치(GPS)"] == "+37.5665+126.9780/" and any("GPS" in a for a in alerts)
     assert "잔존 없음" in metaedit.scrub(mp4)[1]
+
+
+# ---------------- 공격 전달 포맷 (RTF / LNK / ISO) — 무해한 합성 샘플 ----------------
+def _lnk(target=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+         args="-w hidden -enc VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAB0AGUAcwB0AA==",
+         icon=r"C:\Windows\System32\imageres.dll", show=7, tail=b""):
+    """바로가기 바이너리 합성 (명령은 'Write-Output test' — 무해)."""
+    flags = 0x8 | 0x20 | 0x40 | 0x80            # RelativePath | Arguments | IconLocation | Unicode
+    hdr = struct.pack("<I", 0x4C) + bytes.fromhex("0114020000000000c000000000000046") + struct.pack("<I", flags)
+    hdr += bytes(0x3C - len(hdr)) + struct.pack("<I", show)
+    hdr += bytes(76 - len(hdr))
+    sd = b"".join(struct.pack("<H", len(s)) + s.encode("utf-16-le") for s in (target, args, icon))
+    return hdr + sd + b"\x00\x00\x00\x00" + tail
+
+
+def _iso(files):
+    """최소 ISO 9660 합성. files = [(이름, 데이터, 숨김)]."""
+    def rec(name, extent, size, flags):
+        pad = b"\x00" if len(name) % 2 == 0 else b""
+        rl = 33 + len(name) + len(pad)
+        return (bytes([rl, 0]) + struct.pack("<I", extent) + struct.pack(">I", extent)
+                + struct.pack("<I", size) + struct.pack(">I", size) + bytes(7) + bytes([flags, 0, 0])
+                + struct.pack("<H", 1) + struct.pack(">H", 1) + bytes([len(name)]) + name + pad)
+    root = rec(b"\x00", 18, 2048, 2) + rec(b"\x01", 18, 2048, 2)
+    for i, (name, data, hidden) in enumerate(files):
+        root += rec(name.encode() + b";1", 19 + i, len(data), 1 if hidden else 0)
+    total = 19 + len(files)
+    pvd = bytearray(2048)
+    pvd[0:7] = b"\x01CD001\x01"
+    pvd[80:88] = struct.pack("<I", total) + struct.pack(">I", total)
+    pvd[128:132] = struct.pack("<H", 2048) + struct.pack(">H", 2048)
+    pvd[156:190] = rec(b"\x00", 18, 2048, 2)
+    term = b"\xffCD001\x01" + bytes(2041)
+    body = bytes(16 * 2048) + bytes(pvd) + term + root.ljust(2048, b"\x00")
+    for _, data, _ in files:
+        body += data.ljust(-(-len(data) // 2048) * 2048, b"\x00")
+    return body
+
+
+def test_delivery_lnk():
+    from steg_studio import delivery
+    d = _lnk(tail=b"APPENDED-PAYLOAD" * 4)
+    fmt, eof = delivery.identify(d)
+    assert fmt == "LNK 바로가기" and eof == len(d) - 64            # 덧붙인 데이터 직전이 정상 종료
+    _, threats, payloads = delivery.inspect(d)
+    msgs = " | ".join(m for _, m in threats)
+    for want in ("powershell", "-enc", "-WindowStyle Hidden", "SW_SHOWMINNOACTIVE", "아이콘 위장"):
+        assert want in msgs, (want, msgs)
+    assert payloads and "powershell.exe -w hidden" in payloads[0]["decoded"]
+    # 평범한 문서 바로가기는 경보 없음
+    _, t2, _ = delivery.inspect(_lnk(target=r"C:\Users\a\report.docx", args="", icon="", show=1))
+    assert not t2, t2
+
+
+def test_delivery_rtf():
+    from steg_studio import delivery
+    def ole1(cls, native):
+        c = cls.encode() + b"\x00"
+        return (struct.pack("<II", 0x0501, 2) + struct.pack("<I", len(c)) + c
+                + struct.pack("<I", 0) + struct.pack("<I", 0) + struct.pack("<I", len(native)) + native)
+    exe = b"MZ" + bytes(62)
+    pkg = (b"\x02\x00" + b"invoice.pdf.exe\x00" + rb"C:\tmp\invoice.pdf.exe" + b"\x00" + b"\x00\x00\x03\x00"
+           + struct.pack("<I", 4) + b"C:" + bytes([0x5C, 0]) + struct.pack("<I", len(exe)) + exe)
+    hexify = lambda b: r" \par ".join(b.hex()[i:i + 40] for i in range(0, len(b.hex()), 40)).encode()  # 제어어 끼워 난독화
+    rtf = (rb"{\rtf1{\*\template http://example.test/t.dotm}"
+           rb"{\object\objemb\objupdate{\*\objclass Equation.3}{\*\objdata " + hexify(ole1("Equation.3", b"\x1c" * 32)) + b"}}"
+           rb"{\object\objemb{\*\objclass Package}{\*\objdata " + hexify(ole1("Package", pkg)) + b"}}}")
+    assert delivery.identify(rtf) == ("RTF 문서", len(rtf))
+    _, threats, payloads = delivery.inspect(rtf)
+    grades = {m: g for g, m in threats}
+    assert any("CVE-2017-11882" in m and g == "CRITICAL" for m, g in grades.items()), threats
+    assert any("objupdate" in m for m in grades) and any("원격 템플릿" in m for m in grades)
+    assert any("invoice.pdf.exe" in m and g == "HIGH" for m, g in grades.items()), threats
+    assert any(p["name"] == "invoice.pdf.exe" and p["data"] == exe for p in payloads)
+
+
+def test_delivery_iso_and_engine_recursion():
+    import tempfile
+    from steg_studio import delivery, engine
+    iso = _iso([("REPORT.LNK", _lnk(), False), ("PAYLOAD.DLL", b"MZ" + bytes(500), True)])
+    fmt, eof = delivery.identify(iso)
+    assert fmt == "ISO/IMG 디스크 이미지" and eof == len(iso)
+    _, threats, payloads = delivery.inspect(iso)
+    assert any(g == "CRITICAL" and "숨김" in m for g, m in threats), threats
+    assert {p["name"] for p in payloads} == {"REPORT.LNK", "PAYLOAD.DLL"}
+    # 엔진 전체: ISO → (추출) LNK → (재귀) 바로가기 명령 분석까지 연결
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "delivery.iso")
+        with open(p, "wb") as f:
+            f.write(iso)
+        r = engine.scan_file(p)
+    joined = " | ".join(r.findings)
+    assert "[전달포맷/CRITICAL]" in joined and "REPORT.LNK 내부" in joined and "powershell" in joined, joined
+    assert engine._verdict(r)[0] == "의심"

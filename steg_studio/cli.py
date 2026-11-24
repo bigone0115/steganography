@@ -147,16 +147,15 @@ def _cmd_batch(args):
         files += [os.path.join(dp, fn) for fn in fns]
         if not args.recursive:
             break
-    results = []
-    for i, fp in enumerate(sorted(files), 1):
-        try:
-            r = engine.scan_file(fp, args.password)
-        except Exception as e:
-            r = engine.ScanResult(filename=os.path.basename(fp), filepath=fp, findings=[f"[오류] {e}"])
-        r.file_bytes = b""          # 메모리 절약
-        results.append(r)
+    files = sorted(files)
+    workers = args.workers or engine.default_workers()
+    print(f"[*] {len(files)}개 파일, 동시 작업 {min(workers, max(1, len(files)))}개")
+    results = [None] * len(files)
+    # 병렬 스캔 — 끝나는 순서대로 출력, 리포트는 원래 파일 순서로
+    for done, (i, r) in enumerate(engine.scan_many(files, args.password, workers=workers), 1):
+        results[i] = r
         v, top = engine._verdict(r)
-        print(f"[{i}/{len(files)}] {v:2} {r.filename} — {top[:90]}")
+        print(f"[{done}/{len(files)}] {v:2} {r.filename} — {top[:90]}", flush=True)
     if args.csv:
         with open(args.csv, "w", encoding="utf-8", newline="") as f:
             f.write(engine.build_batch_csv(results))
@@ -246,6 +245,8 @@ def build_parser():
     bp.add_argument("--password", default="", help="암호화 패킷 복호화 비밀번호")
     bp.add_argument("--csv", metavar="PATH", help="CSV 리포트 저장 경로")
     bp.add_argument("--html", metavar="PATH", help="HTML 리포트 저장 경로")
+    bp.add_argument("-j", "--workers", type=int, default=0,
+                    help=f"동시 스캔 수 (기본: 코어 절반·최대 8 = {engine.default_workers()}, 1=순차)")
     bp.set_defaults(func=_cmd_batch)
 
     dp = sub.add_parser("diff", help="원본과 의심본 비교(바이트/픽셀 LSB)")
