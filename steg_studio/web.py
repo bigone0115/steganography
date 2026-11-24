@@ -27,6 +27,7 @@ from . import engine, analysis, __version__
 DEFAULT_PORT = 47821
 MAX_UPLOAD = 100 * 1024 * 1024    # 업로드 상한 100MB (엔진 상한 256MB보다 작게: 시연·메모리 여유)
 MAX_ITEM_B64 = 20 * 1024 * 1024   # 탐지 항목 다운로드용 원본 동봉 상한(항목당)
+_ICON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "steganography_icon.png")   # 앱 아이콘(GUI와 동일)
 
 _IMG_SIGS = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
              (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"), (b"BM", "image/bmp"))
@@ -127,6 +128,15 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             page = PAGE.replace("__VER__", __version__).replace("__STATUS__", _engine_summary())
             self._send(200, page, "text/html; charset=utf-8")
+        elif self.path in ("/icon.png", "/favicon.ico"):
+            with open(_ICON, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._json(404, {"error": "not found"})
 
@@ -207,23 +217,32 @@ def serve(host="127.0.0.1", port=DEFAULT_PORT):
 # =========================================================================
 PAGE = r"""<!doctype html><html lang="ko" data-theme="dark"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>스테가노그래피·포렌식 보안 스튜디오</title>
+<title>스테가노그래피·포렌식 보안 스튜디오</title><link rel="icon" href="/icon.png">
 <style>
 :root,[data-theme=dark]{--BASE:#1e1e2e;--MANTLE:#181825;--CRUST:#11111b;--S0:#313244;--S1:#45475a;--S2:#585b70;
  --TEXT:#cdd6f4;--SUB:#a6adc8;--BLUE:#89b4fa;--LAV:#b4befe;--GREEN:#a6e3a1;--RED:#f38ba8;--YEL:#f9e2af;--MAUVE:#cba6f7;--ON:#11111b}
 [data-theme=light]{--BASE:#f4f4f8;--MANTLE:#ffffff;--CRUST:#ffffff;--S0:#e4e4ec;--S1:#d2d2dc;--S2:#b4b4c0;
  --TEXT:#1e1e2e;--SUB:#5c5f77;--BLUE:#1e66f5;--LAV:#5a6fd0;--GREEN:#40a02b;--RED:#d20f39;--YEL:#b8860b;--MAUVE:#8839ef;--ON:#ffffff}
 *{box-sizing:border-box;font-family:'Malgun Gothic','Noto Sans KR',sans-serif;font-size:13.5px}
-html,body{margin:0;height:100%;background:var(--BASE);color:var(--TEXT)}
-body{display:flex;flex-direction:column}
+html,body{margin:0;background:var(--BASE);color:var(--TEXT)}
+body{min-height:100vh;display:flex;flex-direction:column}
 .mono,pre,textarea,table.grid td{font-family:Consolas,'D2Coding',monospace}
 /* 탭 바 — QTabBar */
-.tabbar{display:flex;gap:4px;padding:0 0 0 0;background:var(--BASE)}
-.tabbar button{background:var(--S0);color:var(--SUB);padding:10px 22px;border:0;border-radius:9px 9px 0 0;font-weight:600;cursor:pointer}
-.tabbar button:hover:not(.on){background:var(--S1);color:var(--TEXT)}
-.tabbar button.on{background:var(--BLUE);color:var(--ON)}
-main{flex:1;min-height:0;overflow:auto;padding:10px 12px;border-top:1px solid var(--S0)}
-section{display:none;flex-direction:column;gap:12px;min-height:100%}
+/* 헤더(페이지와 함께 스크롤 — 고정하지 않음): 앱 아이콘·이름 + 세그먼트형 탭 */
+.wrap{width:100%;max-width:1600px;margin:0 auto;padding-left:20px;padding-right:20px}
+header{background:var(--MANTLE);border-bottom:1px solid var(--S0)}
+header .wrap{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;padding-top:14px;padding-bottom:14px}
+.brand{display:flex;align-items:center;gap:13px;min-width:0}
+.brand img{width:42px;height:42px;border-radius:10px;flex:none}
+.brand h1{margin:0;font-size:18px;font-weight:700;color:var(--TEXT);white-space:nowrap}
+.brand p{margin:3px 0 0;color:var(--SUB);font-size:12px}
+.tabbar{display:flex;gap:4px;padding:5px;background:var(--CRUST);border:1px solid var(--S0);border-radius:12px;overflow-x:auto;max-width:100%}
+.tabbar button{display:flex;align-items:center;gap:7px;background:transparent;color:var(--SUB);padding:9px 16px;border:0;border-radius:8px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s,color .15s}
+.tabbar button:hover:not(.on){background:var(--S0);color:var(--TEXT)}
+.tabbar button.on{background:var(--BLUE);color:var(--ON);box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.tabbar .ic{font-size:15px;line-height:1}
+main{flex:1;padding-top:14px;padding-bottom:20px}
+section{display:none;flex-direction:column;gap:12px}
 section.on{display:flex}
 /* 그룹박스 — QGroupBox */
 fieldset{border:1px solid var(--S0);border-radius:10px;margin:6px 0 0;padding:14px 20px 16px;min-width:0}
@@ -249,7 +268,7 @@ table.grid tr:nth-child(even) td{background:var(--BASE)}
 table.grid tbody tr{cursor:pointer} table.grid tbody tr.sel td{background:var(--S1)}
 pre,textarea{margin:0;background:var(--CRUST);color:var(--TEXT);border:1px solid var(--S0);border-radius:8px;padding:8px 10px;white-space:pre-wrap;word-break:break-all;overflow:auto;font-size:12.5px}
 /* 스캐너 하단 분할 */
-.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;height:max(560px,calc(100vh - 470px))}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;height:clamp(560px,78vh,880px)}
 .col{display:flex;flex-direction:column;gap:6px;min-height:0}
 .col fieldset{display:flex;flex-direction:column;min-height:0}
 .col fieldset pre{min-height:0}
@@ -268,13 +287,17 @@ progress{width:100%;height:4px;appearance:none;border:0;background:var(--S0)} pr
 dialog{background:var(--MANTLE);color:var(--TEXT);border:1px solid var(--S0);border-radius:10px;max-width:90vw;max-height:90vh}
 @media (max-width:900px){.split{grid-template-columns:1fr}}
 </style></head><body>
-<nav class="tabbar" id="tabbar">
- <button data-t="scan" class="on">정밀 포렌식 스캐너</button>
- <button data-t="batch">디렉터리 일괄 스캔</button>
- <button data-t="meta">메타데이터</button>
- <button data-t="settings">⚙ 설정</button>
-</nav>
-<main>
+<header><div class="wrap">
+ <div class="brand"><img src="/icon.png" alt="">
+  <div><h1>스테가노그래피·포렌식 보안 스튜디오</h1><p>Stego &amp; Forensic Security Studio · v__VER__ · 웹 UI</p></div></div>
+ <nav class="tabbar" id="tabbar">
+  <button data-t="scan" class="on"><span class="ic">🔍</span>정밀 포렌식 스캐너</button>
+  <button data-t="batch"><span class="ic">📁</span>디렉터리 일괄 스캔</button>
+  <button data-t="meta"><span class="ic">🏷️</span>메타데이터</button>
+  <button data-t="settings"><span class="ic">⚙️</span>설정</button>
+ </nav>
+</div></header>
+<main class="wrap">
 <!-- ===================== 정밀 포렌식 스캐너 ===================== -->
 <section id="t-scan" class="on">
  <fieldset class="drop" id="scanDrop"><legend>검사 대상 및 보안 조치</legend>
@@ -359,7 +382,7 @@ dialog{background:var(--MANTLE);color:var(--TEXT);border:1px solid var(--S0);bor
  <div class="hint">테마는 이 브라우저에 저장됩니다.</div>
 </section>
 </main>
-<div class="statusbar">__STATUS__</div>
+<footer class="statusbar"><div class="wrap" style="padding-top:0;padding-bottom:0">__STATUS__</div></footer>
 <script>
 const $=id=>document.getElementById(id);
 const fmt=n=>n.toLocaleString();
