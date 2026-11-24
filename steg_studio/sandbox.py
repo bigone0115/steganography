@@ -147,6 +147,10 @@ def run_scan_isolated(path, password="", timeout=180, mem_limit_mb=1024, on_log=
     env["STEG_SCAN_PW"] = password
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONPATH"] = _project_root() + os.pathsep + env.get("PYTHONPATH", "")
+    # 수치 라이브러리(OpenBLAS/MKL/OpenMP)는 코어 수만큼 스레드 버퍼를 미리 커밋한다 → 16코어 PC에선
+    # 메모리 상한(1GB)을 그것만으로 소진해 ML 예외·zlib 해제 실패(가짜 '스트림 손상' 탐지)가 났다. 파일 1개 스캔엔 1스레드로 충분.
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        env[var] = "1"
 
     creationflags = 0
     if IS_WINDOWS:
