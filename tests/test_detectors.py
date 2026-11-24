@@ -807,3 +807,62 @@ def test_delivery_iso_and_engine_recursion():
     joined = " | ".join(r.findings)
     assert "[전달포맷/CRITICAL]" in joined and "REPORT.LNK 내부" in joined and "powershell" in joined, joined
     assert engine._verdict(r)[0] == "의심"
+
+
+# ---------------- 압축·디스크 이미지 내부 파일 정밀 스캔 ----------------
+def _zip_bytes(entries, comp=None):
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", comp or zipfile.ZIP_DEFLATED) as z:
+        for name, data in entries:
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def _scan_bytes(data, name):
+    import tempfile
+    from steg_studio import engine
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, name)
+        with open(p, "wb") as f:
+            f.write(data)
+        return engine.scan_file(p)
+
+
+def _stego_png():
+    """기존 은닉 기능으로 무해한 페이로드(print('hi'))를 숨긴 PNG."""
+    import tempfile
+    from steg_studio import embed
+    with tempfile.TemporaryDirectory() as td:
+        carrier = os.path.join(td, "c.png")
+        _img(5, 160, 120).save(carrier)
+        out, _, _ = embed.embed_pixelcode_lsb(carrier, "hi.py", b"print('hi')\n")
+    return out
+
+
+def test_archive_member_stego_detected():
+    """ZIP·ISO 안의 스테가 이미지도 단독 스캔과 같은 픽셀 LSB 분석을 받아야 한다(과거: 정상으로 누락)."""
+    from steg_studio import engine
+    png = _stego_png()
+    for zname, data in (("deflate.zip", _zip_bytes([("photos/a.png", png), ("readme.txt", b"hello")])),
+                        ("iso.iso", _iso([("A.PNG", png, False)]))):
+        r = _scan_bytes(data, zname)
+        joined = " | ".join(r.findings)
+        assert engine._verdict(r)[0] == "의심", (zname, joined)
+        assert "[내부:" in joined and "픽셀 LSB" in joined, (zname, joined)
+        assert any(it.name == "hi.py" for it in r.carved), zname       # 숨긴 파일 복원까지
+    # 중첩: ZIP 안 ZIP(깊이 2)까지는 검사, 3단계부터는 상한으로 생략
+    inner = _zip_bytes([("a.png", png)])
+    assert "픽셀 LSB" in " ".join(_scan_bytes(_zip_bytes([("in.zip", inner)]), "n2.zip").findings)
+    deep = _scan_bytes(_zip_bytes([("l1.zip", _zip_bytes([("l2.zip", inner)]))]), "n3.zip")
+    assert "픽셀 LSB" not in " ".join(deep.findings)
+    assert any("중첩 깊이 상한" in f and "MEDIUM" in f for f in deep.findings), deep.findings   # 생략 사실은 경보로 보임
+
+
+def test_archive_member_clean_and_bomb_guard():
+    from steg_studio import engine
+    clean = _scan_bytes(_zip_bytes([("notes.txt", b"meeting at 3pm\n" * 50)]), "clean.zip")
+    assert engine._verdict(clean)[0] == "정상", clean.findings
+    # 압축 폭탄형(해제 시 상한 초과) 항목은 해제하지 않고 건너뜀
+    bomb = _scan_bytes(_zip_bytes([("zeros.bin", bytes(engine.ARCHIVE_MAX_MEMBER + 1))]), "bomb.zip")
+    assert any("크기 상한" in l for l in bomb.log_lines)

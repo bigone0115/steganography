@@ -1742,10 +1742,11 @@ def obfuscated_blob_score(data, sample=200000):
     return False, ""
 
 
-def scan_file(target_path, password="", log=None):
+def scan_file(target_path, password="", log=None, _depth=0):
     """
     파일을 포렌식 스캔하고 ScanResult를 반환한다.
     log: 선택적 콜백 (str) — 실시간 로그 스트리밍용. None이면 result.log_lines만 채움.
+    _depth: 압축/디스크 이미지 내부 파일을 재스캔할 때의 중첩 깊이(내부용).
     """
     result = ScanResult()
 
@@ -1977,6 +1978,10 @@ def scan_file(target_path, password="", log=None):
     # [6] 재귀 추출 — 카빙된 항목 '내부'에 또 숨은 컨테이너/문서/코드 재검사(중첩 은닉 대응)
     emit("\n[6] 재귀 추출 (카빙 항목 내부 재스캔, 최대 2단계)")
     _recursive_extract(result, findings, emit)
+
+    # [6-B] 압축 파일·디스크 이미지 내부 파일을 '전체 스캔 파이프라인'으로 재검사
+    #       (재귀 추출은 카빙·문서·전달포맷만 본다 → ZIP 안 스테가 이미지의 픽셀 LSB/통계/ML 분석이 빠지던 문제)
+    _scan_archive_members(file_bytes, result, findings, emit, password, _depth)
 
     # [7] 텍스트 스테가노그래피 (제로폭 문자 / 줄끝 공백 / 동형 문자)
     emit("\n[7] 텍스트 스테가노그래피 (제로폭 문자 / SNOW 화이트스페이스 / 동형 문자)")
@@ -2349,6 +2354,91 @@ def diff_files(path_a, path_b, max_ranges=50):
         except Exception:
             pass
     return "\n".join(out)
+
+
+ARCHIVE_MAX_DEPTH = 2                      # 압축 안의 압축 … 최대 중첩 깊이
+ARCHIVE_MAX_MEMBERS = 200                  # 내부 파일 개수 상한
+ARCHIVE_MAX_MEMBER = 64 * 1024 * 1024      # 내부 파일 1개(해제 후) 상한 — 압축 폭탄 방어
+ARCHIVE_MAX_TOTAL = 256 * 1024 * 1024      # 내부 파일 해제 총량 상한
+
+
+def _archive_members(file_bytes):
+    """ZIP 또는 ISO 내부 파일 목록 → (종류, [(이름, 읽기함수, 선언 크기, 암호화 여부)]). 해당 없으면 (None, [])."""
+    if file_bytes.startswith(b"PK\x03\x04"):
+        import zipfile
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(file_bytes))
+        except (zipfile.BadZipFile, ValueError):
+            return None, []
+        is_doc, _kind = docscan._is_zip_office(file_bytes)
+        out = []
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            # 문서형 ZIP(DOCX/HWPX…)의 XML 본문은 docscan이 담당 — 이미지·첨부 객체 등 비XML 파트만 재스캔
+            if is_doc and (info.filename.lower().endswith((".xml", ".rels", ".hpf"))      # .hpf = HWPX 목차(XML)
+                           or info.filename in ("mimetype", "[Content_Types].xml")):
+                continue
+            out.append((info.filename, (lambda i=info: zf.read(i)), info.file_size, bool(info.flag_bits & 0x1)))
+        return ("문서 내부 파트" if is_doc else "ZIP 압축 파일"), out
+    if len(file_bytes) >= 0x8006 and file_bytes[0x8001:0x8006] == b"CD001":
+        return "ISO 디스크 이미지", [(p.lstrip("/"), (lambda o=o, s=s: file_bytes[o:o + s]), s, False)
+                                     for p, o, s, _h in delivery._iso_files(file_bytes)]
+    return None, []
+
+
+def _scan_archive_members(file_bytes, result, findings, emit, password, depth):
+    """압축·디스크 이미지 내부 파일 하나하나를 scan_file 전체 단계로 재검사하고 결과를 '[내부:경로]'로 병합."""
+    kind, members = _archive_members(file_bytes)
+    if not kind or not members:
+        return
+    emit(f"\n[6-B] {kind} 내부 파일 정밀 스캔 ({len(members)}개, 중첩 {depth + 1}/{ARCHIVE_MAX_DEPTH}단계)")
+    if depth >= ARCHIVE_MAX_DEPTH:
+        # 로그로만 남기면 상위 결과에서 보이지 않음 → 경보로 올려 '[내부:…]'로 전파(과도한 중첩 자체가 검사 회피 수법)
+        findings.append(f"[압축내부/MEDIUM] 압축 중첩 깊이 상한({ARCHIVE_MAX_DEPTH}단계) 초과 — 더 깊은 내부 {len(members)}개 미검사, 다중 중첩은 검사 회피 의심")
+        emit(f"  [*] 중첩 깊이 상한({ARCHIVE_MAX_DEPTH})에 도달해 내부 스캔을 생략합니다.")
+        return
+    import tempfile
+    total, hits = 0, 0
+    with tempfile.TemporaryDirectory(prefix="steg_arc_") as td:
+        for n, (name, read, size, encrypted) in enumerate(members[:ARCHIVE_MAX_MEMBERS], 1):
+            if encrypted:
+                findings.append(f"[압축내부/LOW] {name}: 암호화된 항목 — 비밀번호 없이 내용 검사 불가")
+                emit(f"  [*] {name}: 암호화 항목(검사 불가)")
+                continue
+            if size > ARCHIVE_MAX_MEMBER or total + size > ARCHIVE_MAX_TOTAL:
+                emit(f"  [*] {name}: 크기 상한 초과({size:,} B)로 생략")
+                continue
+            try:
+                data = read()
+            except Exception as e:                     # CRC 오류·손상 항목
+                findings.append(f"[압축내부/MEDIUM] {name}: 항목을 해제할 수 없음 ({e})")
+                continue
+            total += len(data)
+            safe = re.sub(r"[^\w.\-]", "_", os.path.basename(name)) or "member.bin"
+            path = os.path.join(td, f"{n:03d}_{safe}")       # 확장자 유지(문서·미디어 분기 판단용)
+            with open(path, "wb") as f:
+                f.write(data)
+            try:
+                sub = scan_file(path, password, _depth=depth + 1)
+            except Exception as e:
+                emit(f"  [-] {name}: 스캔 예외 {e}")
+                continue
+            finally:
+                os.remove(path)
+            verdict, top = _verdict(sub)
+            emit(f"  • {name} ({len(data):,} B) → {verdict}" + (f" — {top[:90]}" if sub.findings else ""))
+            if sub.findings:
+                hits += 1
+            for f in sub.findings:
+                findings.append(f"[내부:{name}] {f}")      # 등급 문자열(CRITICAL/HIGH…) 유지 → 최종 판정에 반영
+            for it in sub.carved:
+                _add(result, f"내부 · {it.category}", it.format, f"{name}:{it.offset}", it.data,
+                     f"{name} 내부: {it.detail}", it.name, it.decoded_text)
+    if len(members) > ARCHIVE_MAX_MEMBERS:
+        emit(f"  [*] 항목 수 상한으로 {len(members) - ARCHIVE_MAX_MEMBERS}개는 검사하지 않았습니다.")
+    if not hits:
+        emit("  [+] 정상: 내부 파일에서 은닉·위협 흔적이 발견되지 않았습니다.")
 
 
 def _delivery_step(file_bytes, result, findings, emit):
