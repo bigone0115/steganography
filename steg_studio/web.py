@@ -5,7 +5,9 @@
     python -m steg_studio web                      (http://127.0.0.1:47821)
     docker run --rm -p 127.0.0.1:47821:47821 steg-studio web --host 0.0.0.0
 
-탭: 정밀 포렌식 스캐너 / 디렉터리 일괄 스캔 / 메타데이터 / 설정.
+탭: 정밀 포렌식 스캐너 / 메타데이터 / 설정.
+디렉터리 일괄 스캔은 웹(도커)에 두지 않는다 — 브라우저로 폴더째 업로드하는 방식은 대용량·장시간 작업에 무리.
+대량 점검은 데스크톱 GUI 또는 CLI(`batch -j N`)를 쓴다.
 '파일·코드 은닉' 탭은 웹에 노출하지 않는다(방어 도구 범위 — 네트워크로 여는 서버에 은닉 기능을 두지 않음).
 
 안전 원칙: 업로드 파일은 임시 폴더에서 '분석만' 하고 절대 실행하지 않으며 응답 직후 삭제한다.
@@ -310,8 +312,7 @@ dialog{background:var(--MANTLE);color:var(--TEXT);border:1px solid var(--S0);bor
   <div><h1>스테가노그래피·포렌식 보안 스튜디오</h1><p>Stego &amp; Forensic Security Studio · v__VER__ · 웹 UI</p></div></div>
  <nav class="tabbar" id="tabbar">
   <button data-t="scan" class="on"><span class="ic">🔍</span>정밀 포렌식 스캐너</button>
-  <button data-t="batch"><span class="ic">📁</span>디렉터리 일괄 스캔</button>
-  <button data-t="meta"><span class="ic">🏷️</span>메타데이터</button>
+   <button data-t="meta"><span class="ic">🏷️</span>메타데이터</button>
   <button data-t="settings"><span class="ic">⚙️</span>설정</button>
  </nav>
 </div></header>
@@ -364,21 +365,6 @@ dialog{background:var(--MANTLE);color:var(--TEXT);border:1px solid var(--S0);bor
   </div>
  </div>
  <div class="status" id="sStatus">파일을 선택하고 [정밀 포렌식 스캔]을 누르세요.</div>
-</section>
-<!-- ===================== 디렉터리 일괄 스캔 ===================== -->
-<section id="t-batch">
- <fieldset><legend>디렉터리 일괄 보안 스캔</legend>
-  <div class="g" style="grid-template-columns:auto 1fr auto auto auto">
-   <label class="l">대상 폴더:</label><input type="text" id="bPath" readonly placeholder="폴더 또는 여러 파일 선택">
-   <button class="b" id="bDir">폴더 선택</button><button class="b" id="bFiles">파일 선택</button><button class="b accent" id="bRun" disabled>일괄 스캔 시작</button>
-  </div>
-  <input type="file" id="bDirIn" webkitdirectory multiple hidden><input type="file" id="bFileIn" multiple hidden>
- </fieldset>
- <div class="hint" id="bStatus">폴더를 선택하고 [일괄 스캔 시작]을 누르세요. (하위 폴더 포함)</div>
- <progress id="bProg" hidden value="0"></progress>
- <div class="tbl" style="flex:1;min-height:420px"><table class="grid"><thead><tr><th>#</th><th>판정</th><th>파일명</th><th>포맷</th><th>크기(B)</th><th>탐지 요약</th></tr></thead><tbody id="bRows"></tbody></table></div>
- <div class="row"><button class="b" id="bCsv" disabled>CSV 리포트 저장</button><button class="b" id="bHtml" disabled>HTML 리포트 저장</button></div>
- <div class="hint">행 더블클릭 → 스캐너 탭에서 열기.</div>
 </section>
 <!-- ===================== 메타데이터 ===================== -->
 <section id="t-meta">
@@ -503,44 +489,6 @@ function drawEntropy(){
   g.fillStyle=V('--SUB');g.textAlign='center';g.fillText(`파일 오프셋 → (블록 ${bl.length}개, 전체 ${fmt(S.filesize)} B, 평균 엔트로피 ${S.entropy})`,L+pw/2,h-12);
 }
 window.addEventListener('resize',drawEntropy);
-
-/* ===================== 디렉터리 일괄 스캔 ===================== */
-let bList=[],bResults=[],bBusy=false,bCancel=false;
-$('bDir').onclick=()=>$('bDirIn').click(); $('bFiles').onclick=()=>$('bFileIn').click(); $('bPath').onclick=()=>$('bDirIn').click();
-function bPick(files){bList=[...files].filter(f=>f.size>0);
-  const root=bList[0]&&bList[0].webkitRelativePath?bList[0].webkitRelativePath.split('/')[0]+'/':'선택한 파일';
-  $('bPath').value=`${root}  (${bList.length}개 파일)`;$('bRun').disabled=!bList.length;$('bStatus').textContent=`${bList.length}개 파일 준비됨 — [일괄 스캔 시작]을 누르세요.`}
-$('bDirIn').onchange=e=>bPick(e.target.files); $('bFileIn').onchange=e=>bPick(e.target.files);
-$('bRun').onclick=async()=>{
-  if(bBusy){bCancel=true;$('bStatus').textContent='취소 중… (진행 중인 파일 끝나면 중단)';return}
-  bBusy=true;bCancel=false;bResults=[];$('bRows').replaceChildren();$('bRun').textContent='취소';$('bCsv').disabled=$('bHtml').disabled=true;
-  const pg=$('bProg');pg.hidden=false;pg.max=bList.length;pg.value=0; let sus=0;
-  // 파일 순서대로 행을 먼저 만들고, 동시에 BATCH_PAR개씩 업로드·분석(서버는 프로세스 풀로 병렬 처리)
-  const BATCH_PAR=3, rowsEl=bList.map((f,i)=>{const tr=el('tr');tr.append(el('td',String(i+1)),el('td','대기'),el('td',f.webkitRelativePath||f.name),el('td','-'),el('td',fmt(f.size)),el('td',''));$('bRows').append(tr);return tr});
-  let next=0,done=0;
-  async function work(){ while(!bCancel&&next<bList.length){ const i=next++,f=bList[i],tr=rowsEl[i];
-    tr.children[1].textContent='분석 중…';
-    let row; try{const d=await post('/api/scan',f);d.file=f;row={n:i+1,verdict:d.verdict,name:f.webkitRelativePath||f.name,fmt:d.carrier,size:d.filesize,summary:d.findings[0]||'특이사항 없음',data:d}}
-    catch(e){row={n:i+1,verdict:'오류',name:f.webkitRelativePath||f.name,fmt:'-',size:f.size,summary:e.message,data:null}}
-    if(row.verdict==='의심')sus++; bResults[i]=row;
-    const vc=el('td');vc.append(el('span',row.verdict,'verdict v-'+row.verdict));
-    tr.replaceChildren(el('td',String(row.n)),vc,el('td',row.name),el('td',row.fmt),el('td',fmt(row.size)),el('td',row.summary));
-    tr.ondblclick=()=>{if(!row.data)return;S=row.data;$('tabbar').children[0].click();$('sPath').value=row.name+'  ('+fmt(row.size)+' bytes)';sFileObj=row.data.file;$('sScan').disabled=false;renderScan()};
-    tr.onclick=()=>[...$('bRows').children].forEach(r=>r.classList.toggle('sel',r===tr));
-    pg.value=++done; $('bStatus').textContent=`[${done}/${bList.length}] 분석 완료 · 동시 ${BATCH_PAR}개 처리 중`;
-  } }
-  await Promise.all(Array.from({length:Math.min(BATCH_PAR,bList.length)},work));
-  rowsEl.forEach((tr,i)=>{if(!bResults[i])tr.remove()});        // 취소로 시작 못 한 행 정리
-  bResults=bResults.filter(Boolean);
-  $('bStatus').textContent=`${bCancel?'취소됨':'완료'} — ${bResults.length}개 검사, 의심 ${sus}개`;
-  pg.hidden=true;$('bRun').textContent='일괄 스캔 시작';bBusy=false;$('bCsv').disabled=$('bHtml').disabled=!bResults.length;
-};
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-$('bCsv').onclick=()=>{const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
-  const lines=[['#','판정','파일명','포맷','크기(B)','탐지 요약','SHA-256'].map(q).join(',')].concat(bResults.map(r=>[r.n,r.verdict,r.name,r.fmt,r.size,r.data?r.data.findings.join(' | ')||'특이사항 없음':r.summary,r.data?r.data.hashes.sha256:''].map(q).join(',')));
-  download('batch_report.csv',new Blob(['﻿'+lines.join('\r\n')],{type:'text/csv'}))};
-$('bHtml').onclick=()=>{const rows=bResults.map(r=>`<tr><td>${r.n}</td><td>${esc(r.verdict)}</td><td>${esc(r.name)}</td><td>${esc(r.fmt)}</td><td>${fmt(r.size)}</td><td>${esc(r.data?r.data.findings.join('\n')||'특이사항 없음':r.summary).replace(/\n/g,'<br>')}</td></tr>`).join('');
-  download('batch_report.html',new Blob([`<!doctype html><html lang="ko"><meta charset="utf-8"><title>일괄 스캔 리포트</title><style>body{font-family:'Malgun Gothic',sans-serif;background:#1e1e2e;color:#cdd6f4;padding:24px}h1{color:#89b4fa}table{border-collapse:collapse;width:100%}th,td{border:1px solid #313244;padding:6px 8px;font-size:13px;text-align:left;vertical-align:top}th{background:#313244;color:#89b4fa}</style><h1>디렉터리 일괄 스캔 리포트</h1><p>${bResults.length}개 파일 · 의심 ${bResults.filter(r=>r.verdict==='의심').length}개</p><table><tr><th>#</th><th>판정</th><th>파일명</th><th>포맷</th><th>크기(B)</th><th>탐지 요약</th></tr>${rows}</table></html>`],{type:'text/html'}))};
 
 /* ===================== 메타데이터 ===================== */
 let mFileObj=null,mOrig={};
