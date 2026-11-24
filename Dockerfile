@@ -1,6 +1,7 @@
 # Stego & Forensic Security Studio — CLI 컨테이너 (GUI 제외: 화면 없는 컨테이너에선 PySide6 불필요)
 # 빌드:  docker build -t steg-studio .
 # 사용:  docker run --rm -v "<분석할 폴더>:/data" steg-studio scan /data/<파일>
+# 웹UI:  docker run --rm -p 127.0.0.1:47821:47821 steg-studio web --host 0.0.0.0  → http://localhost:47821
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -16,5 +17,6 @@ RUN useradd -m analyst
 USER analyst
 WORKDIR /data
 ENV PYTHONIOENCODING=utf-8 PYTHONPATH=/app
+EXPOSE 47821
 ENTRYPOINT ["python", "-m", "steg_studio"]
 CMD ["--help"]

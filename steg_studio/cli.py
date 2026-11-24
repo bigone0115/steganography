@@ -260,7 +260,19 @@ def build_parser():
     mp.add_argument("-o", "--output", help="결과 저장 경로(기본: <file>_edited/_scrubbed.<ext>)")
     mp.set_defaults(func=_cmd_meta)
 
+    wp = sub.add_parser("web", help="브라우저용 웹 UI 실행 (도커 등 화면 없는 환경용)")
+    wp.add_argument("--host", default="127.0.0.1", help="바인드 주소 (도커 안에서는 0.0.0.0)")
+    wp.add_argument("--port", type=int, default=47821, help="포트 (기본 47821)")
+    wp.set_defaults(func=_cmd_web)
+
     return p
+
+
+def _cmd_web(args):
+    """웹 UI 서버 실행(Ctrl+C / docker stop으로 종료)."""
+    from . import web
+    web.serve(args.host, args.port)
+    return 0
 
 
 def main(argv=None):
