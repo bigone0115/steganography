@@ -239,21 +239,30 @@ def _cost_suniward(x, sigma=1.0):
     return np.minimum(rho, 1e10)
 
 
-def _embed_adaptive(gray, rho, payload, rng):
-    """비용맵 rho로 payload(bpp)를 만족하는 λ를 이분탐색, 최소비용 ±1 은닉(STC 시뮬레이터). HILL/WOW/S-UNIWARD 공유 코어."""
-    target = payload * gray.size
+def _ternary_change_probs(rho, target_bits):
+    """비용맵 rho에서 엔트로피=target_bits가 되는 λ를 이분탐색해 위치별 +1/-1 변경확률 p 반환(STC 시뮬레이터 코어)."""
     lo, hi = 1e-3, 1e3
     for _ in range(60):
         lam = (lo * hi) ** 0.5
         e = np.exp(-lam * rho)
         p = e / (1 + 2 * e)
-        if _ternary_entropy(p) > target:
+        if _ternary_entropy(p) > target_bits:
             lo = lam
         else:
             hi = lam
-    u = rng.random(gray.shape)
-    y = gray.astype(np.int16) + (u < p) - ((u >= p) & (u < 2 * p))
-    return np.clip(y, 0, 255).astype(np.uint8)
+    return p
+
+
+def _ternary_apply(x, p, rng):
+    """확률 p로 +1, p로 -1 변경(정수 배열)."""
+    u = rng.random(x.shape)
+    return x + (u < p) - ((u >= p) & (u < 2 * p))
+
+
+def _embed_adaptive(gray, rho, payload, rng):
+    """비용맵 rho로 payload(bpp)를 만족하는 최소비용 ±1 은닉 시뮬레이션. HILL/WOW/S-UNIWARD 공유 코어."""
+    p = _ternary_change_probs(rho, payload * gray.size)
+    return np.clip(_ternary_apply(gray.astype(np.int16), p, rng), 0, 255).astype(np.uint8)
 
 
 def simulate_hill(gray, payload, rng):
@@ -393,6 +402,253 @@ def _demo():
             right = ch[:, 128:].sum() / ch.sum()
             assert right > 0.8, f"{name}: 질감 집중 실패 right={right:.2f}"
     print("ml demo OK - LSBM/HILL/WOW/S-UNIWARD simulators pass")
+    _demo_jpeg()
+
+
+# =========================================================================
+# JPEG 전용 스테그분석 — DCTR 8000차원 특징(Holub & Fridrich 2015) + QF별 분류기
+# 공간 도메인 모델은 JPEG에서 오탐이 나므로, JPEG은 양자화 DCT 계수 기반 별도 모델을 쓴다.
+# 시뮬레이터(nsF5/UERD/J-UNIWARD)는 메모리상 계수 배열만 바꾸며 파일을 쓰지 않는다 — 탐지기 학습 전용(가드레일 B).
+# =========================================================================
+JPEG_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "jpeg_clf.joblib")
+JPEG_MAX_BLOCKS = 16384   # ponytail: 상단 ~1024x1024 영역만 디코딩(순수 Python 디코더 속도 상한). 큰 사진 전체는 디코더 가속 후
+
+_jpeg_model = None
+
+
+def jpeg_available():
+    return NUMPY_OK and os.path.isfile(JPEG_MODEL_PATH)
+
+
+if NUMPY_OK:
+    # 8x8 직교 DCT-II 행렬: 계수 F = D·X·Dᵀ, 복원 X = Dᵀ·F·D (JPEG 정의와 동일)
+    _D8 = np.array([[(np.sqrt(1 / 8) if k == 0 else np.sqrt(2 / 8)) * np.cos((2 * n + 1) * k * np.pi / 16)
+                     for n in range(8)] for k in range(8)])
+    # 지그재그 k번째 → 자연순서 위치(행*8+열)
+    _ZZ = np.array(sorted(range(64), key=lambda p: (p // 8 + p % 8,
+                                                    (p // 8) if (p // 8 + p % 8) % 2 else (p % 8))))
+    # 위상 접기(DCTR 대칭 병합): 0..7 → 0,1,2,3,4,3,2,1 → (a,b) 25개 클래스
+    _FOLD = np.array([0, 1, 2, 3, 4, 3, 2, 1])
+    # J-UNIWARD용 Daubechies 8 웨이블릿 필터(공개 참조구현과 동일 계수)
+    _HPDF = np.array([-0.0544158422, 0.3128715909, -0.6756307363, 0.5853546837, 0.0158291053, -0.2840155430,
+                      -0.0004724846, 0.1287474266, 0.0173693010, -0.0440882539, -0.0139810279, 0.0087460940,
+                      0.0048703530, -0.0003917404, -0.0006754494, -0.0001174768])
+    _LPDF = ((-1) ** np.arange(16)) * _HPDF[::-1]
+    _DB8_BANK = [np.outer(_LPDF, _HPDF), np.outer(_HPDF, _LPDF), np.outer(_HPDF, _HPDF)]
+
+# IJG 표준 휘도 양자화표(QF50, 자연순서) — QF 추정용
+_STD_LUMA = [16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56,
+             14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+             49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99]
+
+
+def ijg_table(qf):
+    """IJG 품질계수(QF) → 8x8 휘도 양자화표(자연순서)."""
+    s = 5000 // qf if qf < 50 else 200 - 2 * qf
+    return np.clip((np.array(_STD_LUMA) * s + 50) // 100, 1, 255).reshape(8, 8)
+
+
+def estimate_qf(q):
+    """양자화표 → (가장 가까운 IJG QF, 평균 절대오차). 오차가 크면 비표준(카메라 자체) 표."""
+    err, qf = min((float(np.abs(ijg_table(f) - q).mean()), f) for f in range(1, 101))
+    return qf, err
+
+
+def jpeg_luma(data, max_blocks=JPEG_MAX_BLOCKS):
+    """JPEG 바이트 → (휘도 양자화 계수 2D 배열[8bh x 8bw, 자연순서], 8x8 양자화표) 또는 None."""
+    import io
+    from PIL import Image
+    from . import steganalysis
+    res = steganalysis.jpeg_dct_coefficients(data, max_blocks=max_blocks, component=0, with_width=True)
+    if not res or not res[0] or not res[1]:
+        return None
+    blocks, bw = res
+    bh = len(blocks) // bw
+    if bh < 2 or bw < 2:
+        return None
+    zz = np.asarray(blocks[:bh * bw], dtype=np.int32)
+    nat = np.empty_like(zz)
+    nat[:, _ZZ] = zz
+    coef = nat.reshape(bh, bw, 8, 8).transpose(0, 2, 1, 3).reshape(bh * 8, bw * 8)
+    try:
+        q = np.array(Image.open(io.BytesIO(data)).quantization[0]).reshape(8, 8)   # Pillow는 자연순서로 반환
+    except Exception:
+        return None
+    return coef, q
+
+
+def _blocks(a):
+    """(8bh x 8bw) → (bh, bw, 8, 8) 블록 뷰."""
+    h, w = a.shape
+    return a.reshape(h // 8, 8, w // 8, 8).transpose(0, 2, 1, 3)
+
+
+def _unblocks(b):
+    bh, bw = b.shape[:2]
+    return b.transpose(0, 2, 1, 3).reshape(bh * 8, bw * 8)
+
+
+def jpeg_decompress(coef, q):
+    """양자화 계수 → 반올림·클리핑 없는 공간 이미지(-128 기준, DCTR·J-UNIWARD 정의)."""
+    b = _blocks(coef.astype(np.float64)) * q
+    return _unblocks(np.einsum("ki,abkl,lj->abij", _D8, b, _D8))
+
+
+def dctr_features(coef, q, qf, T=4):
+    """
+    DCTR: 복원 이미지에 64개 DCT 기저 필터를 전 위치(비데시메이트) 적용 → |응답|/qs 반올림·T 절단 →
+    기저(64) x 위상 클래스(25) x 빈(T+1=5) 정규화 히스토그램 = 8000차원.
+    8x8 기저 필터 응답 = 위상 (a,b)만큼 밀린 격자에서의 블록 DCT 이므로 64번의 블록 DCT로 계산.
+    """
+    x = jpeg_decompress(coef, q)
+    qs = 8 * (2 - max(50, qf) / 50)          # DCTR 원 논문의 QF별 양자화 스텝(QF75 → 4)
+    H, W = x.shape
+    hist = np.zeros((64, 25, T + 1))
+    kl = np.arange(64)[:, None] * (T + 1)
+    for a in range(8):
+        for b in range(8):
+            nh, nw = (H - a) // 8, (W - b) // 8
+            blk = x[a:a + 8 * nh, b:b + 8 * nw].reshape(nh, 8, nw, 8).transpose(0, 2, 1, 3)
+            u = np.einsum("ki,abij,lj->abkl", _D8, blk, _D8).reshape(-1, 64).T      # (64 기저, 위치수)
+            v = np.minimum(np.rint(np.abs(u) / qs), T).astype(np.int64)
+            hist[:, _FOLD[a] * 5 + _FOLD[b]] += np.bincount((kl + v).ravel(), minlength=64 * (T + 1)).reshape(64, T + 1)
+    tot = hist.sum(axis=2, keepdims=True)
+    return (hist / np.where(tot > 0, tot, 1)).ravel().astype(np.float32)
+
+
+def _nz_ac(coef):
+    nz = coef != 0
+    nz[::8, ::8] = False
+    return int(nz.sum())
+
+
+def _inv_binary_entropy(h):
+    lo, hi = 1e-12, 0.5
+    for _ in range(50):
+        m = (lo + hi) / 2
+        e = -m * np.log2(m) - (1 - m) * np.log2(1 - m)
+        lo, hi = (m, hi) if e < h else (lo, m)
+    return lo
+
+
+def simulate_nsf5(coef, q, alpha, rng):
+    """nsF5 시뮬레이션(학습용): alpha bpnzAC 랜덤 페이로드 → 0 아닌 AC 계수 일부의 절댓값을 1 감소(웨트페이퍼 최적 효율 가정)."""
+    nz = coef != 0
+    nz[::8, ::8] = False
+    idx = np.flatnonzero(nz)
+    n_ch = int(round(_inv_binary_entropy(min(alpha, 1.0)) * idx.size))
+    pick = rng.choice(idx, size=n_ch, replace=False)
+    y = coef.copy().ravel()
+    y[pick] -= np.sign(y[pick])
+    return y.reshape(coef.shape)
+
+
+def _cost_uerd(coef, q):
+    """UERD(Guo 2015): 모드 양자화 스텝 / (블록 AC 에너지 + 0.25·8이웃 에너지 합). 평탄 블록(에너지 0)은 웨트."""
+    b = _blocks(np.abs(coef).astype(np.float64)) * q
+    e = b.sum(axis=(2, 3)) - b[:, :, 0, 0]
+    p = np.pad(e, 1, mode="edge")
+    nb = sum(p[1 + dy:1 + dy + e.shape[0], 1 + dx:1 + dx + e.shape[1]]
+             for dy in (-1, 0, 1) for dx in (-1, 0, 1) if dy or dx)
+    qm = q.astype(np.float64).copy()
+    qm[0, 0] = 0.5 * (q[0, 1] + q[1, 0])
+    with np.errstate(divide="ignore"):
+        rho = np.kron(1.0 / (e + 0.25 * nb), np.ones((8, 8))) * np.tile(qm, e.shape)
+    return np.minimum(rho, 1e10)
+
+
+def _cost_juniward(coef, q, sigma=2 ** -6):
+    """J-UNIWARD(Holub 2014): 계수 1 변경이 db8 웨이블릿 3부대역에 주는 상대변화 합. 부대역별 FFT 1회로 64모드 상관."""
+    x = np.pad(jpeg_decompress(coef, q), 16, mode="symmetric")
+    bh, bw = coef.shape[0] // 8, coef.shape[1] // 8
+    s = (x.shape[0] + 15 + 22, x.shape[1] + 15 + 22)       # 선형 합성곱이 되도록 충분한 FFT 크기
+    rho = np.zeros((bh, bw, 8, 8))
+    for f in _DB8_BANK:
+        wfull = np.fft.irfft2(np.fft.rfft2(x, s) * np.fft.rfft2(f, s), s)[:x.shape[0] + 15, :x.shape[1] + 15]
+        FR = np.fft.rfft2(1.0 / (sigma + np.abs(wfull)), s)
+        for i in range(8):
+            for j in range(8):
+                basis = np.outer(_D8[i], _D8[j]) * q[i, j]
+                dw = np.abs(np.fft.irfft2(np.fft.rfft2(basis, (23, 23)) * np.fft.rfft2(f, (23, 23)), (23, 23)))
+                # 블록 (m,n) 변경의 부대역 영향은 wfull[8m+16:, 8n+16:]부터 23x23 → 상관값은 full 결과의 +22 위치
+                corr = np.fft.irfft2(FR * np.fft.rfft2(dw[::-1, ::-1], s), s)
+                rho[:, :, i, j] += corr[38::8, 38::8][:bh, :bw]
+    return np.minimum(_unblocks(rho), 1e10)
+
+
+def _embed_jpeg(coef, rho, alpha, rng):
+    return _ternary_apply(coef, _ternary_change_probs(rho, alpha * _nz_ac(coef)), rng)
+
+
+def simulate_uerd(coef, q, alpha, rng):
+    """UERD 적응형 JPEG 은닉 시뮬레이션(학습용, alpha bpnzAC 랜덤 페이로드)."""
+    return _embed_jpeg(coef, _cost_uerd(coef, q), alpha, rng)
+
+
+def simulate_juniward(coef, q, alpha, rng):
+    """J-UNIWARD 적응형 JPEG 은닉 시뮬레이션(학습용, alpha bpnzAC 랜덤 페이로드)."""
+    return _embed_jpeg(coef, _cost_juniward(coef, q), alpha, rng)
+
+
+JPEG_SIMULATORS = {"nsf5": simulate_nsf5, "uerd": simulate_uerd, "juniward": simulate_juniward}
+
+
+def predict_jpeg(data):
+    """
+    JPEG 바이트 → (보정 은닉 확률 0~1, 설명) 또는 (None, 건너뛴 이유).
+    양자화표로 QF를 추정해 가장 가까운 QF 모델을 쓴다. 학습 QF와 ±3 넘게 다르거나 비표준 표면
+    판정하지 않는다(학습 조건 밖 = 오탐 원인).
+    """
+    global _jpeg_model
+    if not jpeg_available():
+        return None, "JPEG 모델 없음"
+    if _jpeg_model is None:
+        import joblib
+        _jpeg_model = joblib.load(JPEG_MODEL_PATH)   # 자체 학습한 로컬 파일만 로드
+    lq = jpeg_luma(data)
+    if lq is None:
+        return None, "DCT 계수 추출 불가"
+    coef, q = lq
+    qf, err = estimate_qf(q)
+    models = _jpeg_model["models"]
+    near = min(models, key=lambda f: abs(f - qf))
+    if err > 1.0 or abs(near - qf) > 3:
+        return None, f"학습 범위 밖 양자화표(추정 QF {qf}, 표 오차 {err:.1f}; 학습 QF {sorted(models)})"
+    m = models[near]
+    raw = float(m["clf"].predict_proba(dctr_features(coef, q, near)[None, :])[0, 1])
+    cal = _calibrate_prob(raw, m["thr_med"], m["thr_high"])
+    return cal, (f"DCTR8000 QF{near} 모델(추정 QF {qf}, 분석 {coef.shape[1]}x{coef.shape[0]}px, raw {raw:.3f}) "
+                 f"| 학습: {_jpeg_model.get('info', '')}")
+
+
+def _demo_jpeg():
+    """JPEG 경로 자가검증: 디코더 격자·IDCT가 Pillow 복원과 일치, QF 추정, DCTR 차원, 시뮬레이터 페이로드·적응성."""
+    import io
+    from PIL import Image
+    assert abs(_LPDF.sum() - np.sqrt(2)) < 1e-6 and abs(_HPDF.sum()) < 1e-6, "db8 필터 계수 오류"
+    rng = np.random.default_rng(0)
+    g = np.full((256, 256), 100.0) + np.add.outer(np.arange(256), np.arange(256)) * 0.1
+    g[:, 128:] += rng.normal(0, 25, (256, 128))                    # 오른쪽 절반만 질감
+    buf = io.BytesIO()
+    Image.fromarray(np.clip(g, 0, 255).astype(np.uint8)).save(buf, "JPEG", quality=75)
+    coef, q = jpeg_luma(buf.getvalue())
+    assert coef.shape == (256, 256), coef.shape
+    assert estimate_qf(q) == (75, 0.0), estimate_qf(q)
+    pil = np.asarray(Image.open(io.BytesIO(buf.getvalue())), dtype=np.float64)
+    diff = np.abs(np.clip(np.rint(jpeg_decompress(coef, q) + 128), 0, 255) - pil).mean()
+    assert diff < 1.0, f"계수 격자/IDCT 불일치 {diff:.2f}"
+    f = dctr_features(coef, q, 75)
+    assert f.shape == (8000,) and np.allclose(f.reshape(1600, 5).sum(1), 1.0)
+    nz = _nz_ac(coef)
+    for name, sim in JPEG_SIMULATORS.items():
+        y = sim(coef, q, 0.4, np.random.default_rng(1))
+        ch = y != coef
+        assert 0 < ch.sum() < nz, f"{name}: 변경 수 비정상 {ch.sum()}/{nz}"
+        if name != "nsf5":
+            right = ch[:, 128:].sum() / ch.sum()
+            assert right > 0.8, f"{name}: 질감 집중 실패 right={right:.2f}"
+        assert np.abs(dctr_features(y, q, 75) - f).sum() > 0
+    print("ml jpeg demo OK - decoder grid, QF estimate, DCTR8000, nsF5/UERD/J-UNIWARD simulators pass")
 
 
 if __name__ == "__main__":

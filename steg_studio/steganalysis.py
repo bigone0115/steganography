@@ -258,11 +258,12 @@ def _extend(v, t):
     return v - (1 << t) + 1 if t and v < (1 << (t - 1)) else v
 
 
-def jpeg_dct_coefficients(data, max_blocks=6000, component=None):
+def jpeg_dct_coefficients(data, max_blocks=6000, component=None, with_width=False):
     """
     JPEG(baseline + progressive)에서 양자화된 DCT 계수 블록(각 64개, 지그재그 순서)을 추출.
     이미지 위쪽부터 휘도 블록이 약 max_blocks개가 되는 영역까지만 디코딩(속도 상한).
     component=None이면 모든 성분, 0이면 휘도(Y)만. 산술부호화 등 미지원이면 None.
+    with_width=True(성분 지정 시)면 (블록목록, 블록 열 수)를 반환 — 2D 격자 복원용(ML DCTR 특징).
     """
     if data[:2] != b"\xff\xd8":
         return None
@@ -351,6 +352,8 @@ def jpeg_dct_coefficients(data, max_blocks=6000, component=None):
         rows = min(c["ah"], c["bh_full"])
         for r in range(rows):
             out.extend(c["blocks"][r * c["aw"]:r * c["aw"] + c["bw"]])
+    if with_width:
+        return out, (comps[component]["bw"] if component is not None else 0)
     return out
 
 

@@ -188,6 +188,14 @@ def test_ml_features_tiles_and_calibration():
     assert ml._calibrate_prob(0.95, 0.60, 0.85) > 0.90
 
 
+def test_jpeg_dctr_and_simulators():
+    """JPEG ML 경로: 디코더 계수 격자·IDCT 일치, QF 추정, DCTR 8000차원, nsF5/UERD/J-UNIWARD 시뮬레이터."""
+    from steg_studio import ml
+    if not ml.NUMPY_OK:
+        return
+    ml._demo_jpeg()
+
+
 def test_jpeg_skips_spatial_lsb():
     """정상 JPEG 스캔 시 공간(픽셀) LSB/RS/WS 오탐 없이 DCT 분석만 수행되는지."""
     import tempfile

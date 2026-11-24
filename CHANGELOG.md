@@ -5,6 +5,16 @@ Stego & Forensic Security Studio — 단일 파일 도구에서 모듈형 크로
 
 ---
 
+## 2026-11-24 — JPEG 전용 ML 스테그분석 (DCTR)
+
+### 추가
+- **DCTR 8000차원 특징**(Holub & Fridrich 2015) — 양자화 DCT 계수 → 비반올림 복원 → 64 DCT 기저 비데시메이트 응답 히스토그램.
+  기존 공간 모델은 JPEG에서 오탐이 나 건너뛰던 공백을 메움. `ml.dctr_features`, `ml.predict_jpeg`, 스캔 JPEG 분기에 연결.
+- **QF별 모델**: 양자화표로 QF 추정 → 가장 가까운 학습 QF 모델 사용. ±3 밖·비표준 표는 "학습 범위 밖"으로 판정 생략(오탐 방지).
+- **학습용 JPEG 시뮬레이터**(메모리상 계수만 변경, 파일 미생성): nsF5, UERD, J-UNIWARD(db8, 직접 계산 대조 일치).
+- 학습 `tools/train_jpeg.py <BOSSbase> [--qfs 75,90]` → `models/jpeg_clf.joblib` + `jpeg_report.txt`.
+- 회귀 테스트 1종 추가 (44/44 통과). **모델은 아직 미학습**(BOSSbase 필요) — 모델 파일이 없으면 기능만 조용히 비활성.
+
 ## 2026-11-23 — 메타데이터 2차: 잔존 검사 · 포렌식 · pikepdf · 신규 포맷
 
 ### 추가

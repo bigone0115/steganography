@@ -1639,6 +1639,20 @@ def _image_steganalysis(img, file_bytes, ext, findings, emit, label="픽셀"):
         findings.append(f"[스테그분석/HIGH] JPEG F5 은닉 의심 (보정 β={beta:.2f})")
     elif beta is not None and beta >= 0.15:
         findings.append(f"[스테그분석/MEDIUM] JPEG F5 은닉 가능성 (보정 β={beta:.2f})")
+    # JPEG 전용 ML(DCTR) — 적응형 JPEG 은닉(J-UNIWARD/UERD)·nsF5. 학습 QF 밖이면 판정 생략
+    if ml.jpeg_available():
+        try:
+            prob, info = ml.predict_jpeg(file_bytes)
+        except Exception as e:
+            prob, info = None, f"예외: {e}"
+        if prob is None:
+            emit(f"  • JPEG ML 스테그분석 : 건너뜀 ({info})")
+        else:
+            emit(f"  • JPEG ML 스테그분석 은닉 확률 : {prob:.3f} — {info}")
+            if prob >= 0.9:
+                findings.append(f"[ML/HIGH] {pre}JPEG 분류기: 적응형/nsF5 은닉 확률 {prob:.0%}")
+            elif prob >= 0.75:
+                findings.append(f"[ML/MEDIUM] {pre}JPEG 분류기: 은닉 가능성 {prob:.0%}")
 
 
 def _video_frames(path, findings, emit):
