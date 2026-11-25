@@ -18,6 +18,7 @@ python run_tk.py                  # (레거시) tkinter GUI
 python -m steg_studio scan  악성.pdf --isolated --json report.json
 python -m steg_studio embed carrier.png payload.py -o out.png --password pw
 python -m steg_studio sanitize 의심.png -o 안전본.png
+python -m steg_studio batch 폴더 -r --fail-on critical   # CI용 종료코드: 0 통과 / 1 등급 이상 탐지 / 2 검사 오류
 python -m steg_studio batch 폴더 -r --csv out.csv --html out.html   # 병렬(-j N, 기본 코어 절반·최대 8)
 python -m steg_studio diff 원본.png 의심.png
 ```

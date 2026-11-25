@@ -20,6 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Gitleaks가 전체 기록을 보도록
+      # 커밋 기록 전체에서 비밀키 검사 (태그 변조에 대비해 다이제스트로 고정, v8.30.1)
+      - name: Gitleaks
+        run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git /repo --redact --no-banner --verbose
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -69,6 +74,25 @@ jobs:
           printf 'hello' > /tmp/t.txt
           curl -fsS -X POST --data-binary @/tmp/t.txt -H "X-Filename: t.txt" http://127.0.0.1:47821/api/scan | grep -q '"verdict"'
           docker rm -f web
+
+      # 1-2) 취약점·비밀키 검사 — 전체(HIGH 이상)는 보고만, 수정판이 나온 CRITICAL은 배포 차단 (v0.76.2 다이제스트 고정)
+      - name: Trivy
+        run: |
+          docker save steg-studio:ci -o /tmp/image.tar
+          trivy() {
+            docker run --rm -v /tmp/image.tar:/image.tar:ro -v trivy-cache:/root/.cache               ghcr.io/aquasecurity/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb               image --input /image.tar --scanners vuln,secret --timeout 15m "$@"
+          }
+          trivy --severity HIGH,CRITICAL
+          trivy --severity CRITICAL --ignore-unfixed --exit-code 1 --quiet
+          rm /tmp/image.tar
+
+      # 1-3) 은닉·악성 파일 게이트: 정상 파일은 0, 검사 불가(폴더 없음)는 2로 끝나야 한다
+      - name: batch --fail-on 종료코드 확인
+        run: |
+          mkdir -p /tmp/gate && printf 'hello' > /tmp/gate/t.txt
+          docker run --rm -v /tmp/gate:/data:ro steg-studio:ci batch /data -r --fail-on critical
+          rc=0; docker run --rm steg-studio:ci batch /no-such-dir --fail-on critical || rc=$?
+          test "$rc" -eq 2
 
       # 2) PR이 아니면 GHCR에 푸시 (캐시 재사용이라 재빌드는 빠름)
       - if: github.event_name != 'pull_request'

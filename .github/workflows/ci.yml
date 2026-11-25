@@ -1,10 +1,17 @@
 name: CI
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Gitleaks가 전체 기록을 보도록
+      # 커밋 기록 전체에서 비밀키 검사 (태그 변조에 대비해 다이제스트로 고정, v8.30.1)
+      - name: Gitleaks
+        run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git /repo --redact --no-banner --verbose
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

@@ -428,6 +428,40 @@ def test_effective_ext_sniffs_disguised():
     assert engine._effective_ext(b"nomagic", "/x/a.png") == ".png"
 
 
+def test_batch_fail_on_exit_codes():
+    """CI 게이트 종료코드: 0 통과 / 1 기준 이상 / 2 검사 오류(1보다 우선). 파일명 속 등급 글자는 무시."""
+    import tempfile
+    from steg_studio import cli, engine
+    orig = engine.scan_many
+
+    def run(findings, *opts):
+        engine.scan_many = lambda paths, *a, **k: iter(
+            [(0, engine.ScanResult(filename="a", filepath="a", findings=findings))])
+        try:
+            return cli.main(["batch", td, *opts])
+        finally:
+            engine.scan_many = orig
+
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, "a.txt"), "w") as f:
+            f.write("hello")
+        crit = ("--fail-on", "critical")
+        assert cli.main(["batch", td, "-j", "1", *crit]) == 0           # 실제 스캔
+        assert cli.main(["batch", os.path.join(td, "none"), *crit]) == 2
+        assert run(["[ML/HIGH] x"], *crit) == 0
+        assert run(["[ML/HIGH] x"], "--fail-on", "high") == 1
+        assert run(["[ML/HIGH] x"]) == 1                                # 기본 동작 유지
+        assert run(["[내부:a.png] [확정/CRITICAL] x"], *crit) == 1
+        assert run(["[확정/TAMPERED] x"], *crit) == 1
+        assert run(["[IOC/LOW] CRITICAL.txt"], *crit) == 0
+        assert run(["[오류] 손상"], *crit) == 2
+        assert run(["[오류] 손상", "[확정/CRITICAL] x"]) == 2
+        real = os.path.join(td, "s.png")                                # 실제 은닉 PNG → CRITICAL
+        with open(real, "wb") as f:
+            f.write(_stego_png())
+        assert cli.main(["batch", td, "-j", "1", *crit]) == 1
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

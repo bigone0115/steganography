@@ -20,6 +20,7 @@ GUI와 완전히 분리된 engine/embed 모듈을 호출하므로 Windows·Linux
 """
 
 import os
+import re
 import sys
 import argparse
 
@@ -140,10 +141,29 @@ def _cmd_sanitize(args):
 # =========================================================================
 # argparse 구성 및 진입점
 # =========================================================================
+# 등급 순위. WARNING은 _verdict에서 '의심'이라 HIGH와 같은 급, TAMPERED(은닉 패킷 변조)는 CRITICAL과 같은 급
+_FAIL_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+_RANK = {**{k.upper(): v for k, v in _FAIL_RANK.items()}, "WARNING": 3, "TAMPERED": 4}
+# 본문이 아니라 [분류/등급] 태그만 읽는다 (파일명에 HIGH가 들어가도 차단되지 않게). [내부:경로] 접두도 지원
+_GRADE_RE = re.compile(r"/(" + "|".join(_RANK) + r")\]")
+
+
+def _severity(result):
+    """탐지 항목 중 가장 높은 등급 순위(0=없음)."""
+    return max((_RANK[g] for f in result.findings for g in _GRADE_RE.findall(f)), default=0)
+
+
 def _cmd_batch(args):
-    """폴더 일괄 스캔 → 요약 출력 + CSV/HTML 리포트. 의심 파일이 있으면 종료코드 1."""
+    """
+    폴더 일괄 스캔 → 요약 출력 + CSV/HTML 리포트.
+    종료코드: 0 통과 / 1 차단 기준 이상 탐지(기본 '의심', --fail-on 등급 지정 가능) / 2 검사 못 한 항목 있음(1보다 우선).
+    """
+    if not os.path.isdir(args.folder):
+        print(f"[오류] 폴더를 찾을 수 없습니다: {args.folder}", file=sys.stderr)
+        return 2
     files = []
-    for dp, _, fns in os.walk(args.folder):
+    walk_errors = []        # 읽지 못한 하위 폴더 — 조용히 통과시키지 않는다
+    for dp, _, fns in os.walk(args.folder, onerror=walk_errors.append):
         files += [os.path.join(dp, fn) for fn in fns]
         if not args.recursive:
             break
@@ -164,7 +184,16 @@ def _cmd_batch(args):
         with open(args.html, "w", encoding="utf-8") as f:
             f.write(engine.build_batch_html(results))
         print(f"[+] HTML 저장: {args.html}")
-    return 1 if any(engine._verdict(r)[0] == "의심" for r in results) else 0
+    if args.fail_on:
+        blocked = [r for r in results if _severity(r) >= _FAIL_RANK[args.fail_on]]
+    else:
+        blocked = [r for r in results if engine._verdict(r)[0] == "의심"]
+    failed = [f"{r.filepath}: {f}" for r in results for f in r.findings if f.startswith("[오류]")]
+    failed += [f"[오류] {e}" for e in walk_errors]
+    for msg in failed:
+        print(f"[!] 검사 실패: {msg}", file=sys.stderr)
+    print(f"[*] 차단 기준({args.fail_on or '의심'}) 해당 {len(blocked)}개, 검사 실패 {len(failed)}건")
+    return 2 if failed else 1 if blocked else 0
 
 
 def _cmd_diff(args):
@@ -247,6 +276,8 @@ def build_parser():
     bp.add_argument("--html", metavar="PATH", help="HTML 리포트 저장 경로")
     bp.add_argument("-j", "--workers", type=int, default=0,
                     help=f"동시 스캔 수 (기본: 코어 절반·최대 8 = {engine.default_workers()}, 1=순차)")
+    bp.add_argument("--fail-on", choices=list(_FAIL_RANK),
+                    help="이 등급 이상 탐지 시 종료코드 1 (기본: '의심' 판정 시). 검사 오류는 항상 2")
     bp.set_defaults(func=_cmd_batch)
 
     dp = sub.add_parser("diff", help="원본과 의심본 비교(바이트/픽셀 LSB)")

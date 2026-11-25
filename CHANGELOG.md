@@ -5,6 +5,12 @@ Stego & Forensic Security Studio — 단일 파일 도구에서 모듈형 크로
 
 ---
 
+## 2026-11-25 — CI/CD 보안 검사
+
+- CI: Gitleaks(커밋 기록 전체), Docker: Gitleaks + Trivy(수정판이 있는 CRITICAL이면 GHCR 푸시 차단, HIGH 이상은 보고). 검사 도구는 다이제스트로 고정.
+- CLI `batch --fail-on {low,medium,high,critical}` 추가. 검사 오류·없는 폴더·읽지 못한 하위 폴더는 종료코드 2(기존: 0으로 통과 가능).
+  옵션이 없으면 기존처럼 '의심'일 때 1.
+
 ## 2026-11-24 (4) — 웹 UI(도커)에서 디렉터리 일괄 스캔 제외
 
 - 웹 UI 탭을 **정밀 포렌식 스캐너 / 메타데이터 / 설정** 3개로 정리. 브라우저로 폴더를 통째로 업로드하는 방식은
